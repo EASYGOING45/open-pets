@@ -68,6 +68,11 @@
 <td><a href="open-pet-creator/"><code>open-pet-creator/</code></a></td>
 </tr>
 <tr>
+<td>🖥️ <b>OpenPets 桌面应用</b>（Phase 1）</td>
+<td>Tauri 2 写的轻量级桌面渲染器（~5MB），直接读 <code>~/.codex/pets/</code>，让宠物脱离 Codex 也能在桌面动起来；macOS 优先，Linux/Windows 在路上</td>
+<td><a href="app/"><code>app/</code></a></td>
+</tr>
+<tr>
 <td>🐾 <b>三只可直接安装的宠物</b></td>
 <td>Phrolova、粉星仔、迪莫，每只都包含 9 行 × 8 列完整原子图与 <code>pet.json</code></td>
 <td><a href="pets/"><code>pets/</code></a></td>
@@ -252,6 +257,11 @@ open-pets/
 │   ├── agents/openai.yaml                agent 接入元信息
 │   ├── references/codex-pet-atlas.md     Codex 原子图契约文档
 │   └── scripts/                          repack / inspect / validate / install
+│
+├── 🖥️ app/                          ← 桌面应用（Phase 1，Tauri 2，macOS 优先）
+│   ├── index.html / main.js / style.css   纯原生前端，无框架
+│   ├── package.json                      只有 @tauri-apps/cli 一个 devDep
+│   └── src-tauri/                        Rust 核：窗口 / 托盘 / 宠物扫描
 │
 ├── 🐾 pets/                         ← 已收录宠物
 │   ├── phrolova/  (鸣潮)
