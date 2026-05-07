@@ -69,7 +69,7 @@
 </tr>
 <tr>
 <td>🖥️ <b>OpenPets 桌面应用</b>（Phase 1）</td>
-<td>Tauri 2 写的轻量级桌面渲染器（~5MB），直接读 <code>~/.codex/pets/</code>，让宠物脱离 Codex 也能在桌面动起来；macOS 优先，Linux/Windows 在路上</td>
+<td>Tauri 2 写的轻量级桌面渲染器（~5MB），直接读 <code>~/.codex/pets/</code>，让宠物脱离 Codex 也能在桌面动起来。<b>跨全屏 Space 可见</b>、可拖动、点击触发动画；托盘菜单 + 磨砂玻璃 picker 面板支持多宠物切换。macOS 优先，Linux/Windows 在路上</td>
 <td><a href="app/"><code>app/</code></a></td>
 </tr>
 <tr>
@@ -259,9 +259,10 @@ open-pets/
 │   └── scripts/                          repack / inspect / validate / install
 │
 ├── 🖥️ app/                          ← 桌面应用（Phase 1，Tauri 2，macOS 优先）
-│   ├── index.html / main.js / style.css   纯原生前端，无框架
+│   ├── index.html / main.js / style.css   主宠物窗口（vanilla 前端）
+│   ├── picker.html / picker.js / picker.css  多宠物切换面板
 │   ├── package.json                      只有 @tauri-apps/cli 一个 devDep
-│   └── src-tauri/                        Rust 核：窗口 / 托盘 / 宠物扫描
+│   └── src-tauri/                        Rust 核：窗口 / 托盘 / NSPanel hack
 │
 ├── 🐾 pets/                         ← 已收录宠物
 │   ├── phrolova/  (鸣潮)

@@ -21,6 +21,10 @@ on your screen — independent of Codex CLI.
   fullscreen, etc.) and follows the user across Mission Control Spaces
 - **Drag the pet** to move it; **click** (without drag) to play the wave
   animation
+- **Pick which pet shows** via the tray menu (one menu item per installed
+  pet) or a visual picker panel: tray menu → *Choose Pet…* opens a
+  frosted-glass 400×240 grid of thumbnails, click one to switch. Esc
+  or clicking elsewhere dismisses the picker.
 - Tray icon menu → `Quit`
 
 ## Roadmap (Phase 2)
@@ -28,10 +32,12 @@ on your screen — independent of Codex CLI.
 - External event source — let Codex / Claude Code / Cursor drive pet states
   via a local socket or file watcher (e.g., AI is generating → `running`,
   test failed → `failed`, task done → `waving`)
-- Pet picker UI in tray menu (currently loads the first pet alphabetically)
 - Click-through on transparent pixels (so the window doesn't intercept
   clicks on its empty edges; needs sprite-bbox hit-testing)
-- Multi-pet support, drag-to-position memory, settings panel
+- Multi-pet support (multiple pets visible simultaneously), drag-to-position
+  memory across launches, settings panel
+- Persist active-pet selection across launches (currently always defaults
+  to the first pet alphabetically on cold start)
 - Cross-platform parity (Linux / Windows)
 
 ## Prerequisites
@@ -82,22 +88,26 @@ Bundle size is typically **~5 MB** thanks to using the system WebKit
 
 ```text
 app/
-├── index.html            Frontend entry (vanilla, no framework)
-├── main.js               State machine + sprite animation; click → wave;
-│                         mousedown → invoke('start_drag') for window drag
+├── index.html            Main pet window entry (vanilla, no framework)
+├── main.js               State machine + sprite animation; subscribes to
+│                         `pet-changed` events to swap atlas on demand
 ├── style.css             Transparent body, grab cursor on the pet
+├── picker.html           Pet picker dialog entry
+├── picker.js             Builds the thumbnail grid; calls `set_active_pet`
+├── picker.css            Frosted-glass dialog look
 ├── package.json          Tauri CLI as the only Node dep
 └── src-tauri/
     ├── Cargo.toml        Minimal Rust deps (tauri + serde + objc on macOS)
-    ├── tauri.conf.json   Window config (transparent, always-on-top, …)
+    ├── tauri.conf.json   Main window config (transparent, always-on-top, …)
     ├── build.rs          Tauri build script
     ├── capabilities/
-    │   └── default.json  Permission set for the main window
+    │   └── default.json  Permissions for both `main` and `picker` windows
     ├── icons/
     │   └── icon.png      Placeholder generated from Phrolova
     └── src/
-        └── main.rs       Pet directory scan + tray + NSPanel hack +
-                          start_drag command
+        └── main.rs       Pet scan + dynamic tray menu + NSPanel hack +
+                          start_drag / list_pets / get_active_pet /
+                          set_active_pet commands + picker window factory
 ```
 
 ## How it stays lightweight

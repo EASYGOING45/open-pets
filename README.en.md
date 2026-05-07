@@ -11,7 +11,7 @@
 | | |
 | --- | --- |
 | 🛠️ **A reusable Skill** — `open-pet-creator` | repack / inspect / validate / install scripts that any Codex or Claude Code agent can drive |
-| 🖥️ **OpenPets desktop app** (Phase 1) | A ~5MB Tauri 2 renderer that reads `~/.codex/pets/` and animates the chibi sprites in a transparent always-on-top window — independent of the Codex CLI; macOS first |
+| 🖥️ **OpenPets desktop app** (Phase 1) | A ~5MB Tauri 2 renderer that reads `~/.codex/pets/` and animates the chibi sprites in a transparent always-on-top window — independent of the Codex CLI. **Visible across full-screen Spaces**, draggable, click-to-wave; a tray menu and a frosted-glass picker panel let you switch between installed pets. macOS first |
 | 🐾 **Three ready-to-install pets** | Phrolova (Wuthering Waves), Pink Star (Roco World), Dimo (Roco World) |
 | 📝 **Reproducible design docs** | per-pet design docs and image-generation prompts you can fork to make your own |
 | ✅ **Regression tests** | a contract test suite that locks the Codex atlas format (8 × 9 grid, 192 × 208 cells, transparent unused cells) |
@@ -159,9 +159,10 @@ open-pets/
 │         ├── validate_pet_atlas.py
 │         └── install_pet.py
 ├── app/                               OpenPets desktop renderer (Tauri 2)
-│   ├── index.html / main.js / style.css   Vanilla, no framework
+│   ├── index.html / main.js / style.css   Main pet window (vanilla)
+│   ├── picker.html / picker.js / picker.css  Pet picker dialog
 │   ├── package.json                       @tauri-apps/cli only
-│   └── src-tauri/                         Rust core: window / tray / pet scan
+│   └── src-tauri/                         Rust core: window / tray / NSPanel hack
 ├── pets/                              Ready-to-install pet packages
 │   ├── phrolova/   pink-star/   rocom-dimo/
 │   │     ├── pet.json
