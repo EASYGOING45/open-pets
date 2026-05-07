@@ -11,6 +11,7 @@
 [![Codex CLI](https://img.shields.io/badge/Codex_CLI-supported-success.svg?style=flat-square)](https://github.com/openai/codex)
 [![Claude Code](https://img.shields.io/badge/Claude_Code-supported-success.svg?style=flat-square)](https://www.anthropic.com/claude-code)
 [![GitHub Stars](https://img.shields.io/github/stars/EASYGOING45/open-pets?style=flat-square&color=yellow)](https://github.com/EASYGOING45/open-pets/stargazers)
+[![Petdex](https://img.shields.io/badge/Petdex-published-ff69b4.svg?style=flat-square)](https://petdex.crafter.run/)
 
 [English](./README.en.md) · **简体中文**
 
@@ -18,15 +19,20 @@
 <tr>
 <td align="center" width="33%">
   <img src="pets/phrolova/spritesheet-repacked-preview.png" width="220"><br>
-  <b>Phrolova</b> · <i>鸣潮</i>
+  <b>Phrolova</b> · <i>鸣潮</i><br>
+  <code>npx petdex install phrolova</code><br>
+  <a href="https://petdex.crafter.run/zh/pets/phrolova">Petdex 主页 →</a>
 </td>
 <td align="center" width="33%">
   <img src="pets/pink-star/spritesheet-repacked-preview.png" width="220"><br>
-  <b>粉星仔</b> · <i>洛克王国</i>
+  <b>粉星仔</b> · <i>洛克王国</i><br>
+  <code>npx petdex install pink-star</code><br>
+  <a href="https://petdex.crafter.run/zh/pets/pink-star">Petdex 主页 →</a>
 </td>
 <td align="center" width="33%">
   <img src="pets/rocom-dimo/spritesheet-repacked-preview.png" width="220"><br>
-  <b>迪莫</b> · <i>洛克王国</i>
+  <b>迪莫</b> · <i>洛克王国</i><br>
+  <sub>仅本仓库（待上架 Petdex）</sub>
 </td>
 </tr>
 </table>
@@ -83,21 +89,35 @@
 
 ## 🚀 快速开始
 
-### 路线 A：只想装一只宠物（30 秒）
+### 路线 A：用 Petdex 一行命令装好（最快，已上架 Petdex 的宠物）
+
+[Phrolova](https://petdex.crafter.run/zh/pets/phrolova) 与 [Pink Star](https://petdex.crafter.run/zh/pets/pink-star) 已上架 [Petdex](https://petdex.crafter.run/)，无需 clone 仓库：
+
+```bash
+# 任选其一，命令会自动下载并放到 ~/.codex/pets/
+npx petdex install phrolova
+npx petdex install pink-star
+```
+
+装完后在 Codex 里：**Settings → Appearance → Pets → Custom pets → 选中宠物**，然后输入 `/pet` 召唤即可。
+
+### 路线 B：手动安装（适合迪莫，或离线/开发场景）
 
 ```bash
 git clone https://github.com/EASYGOING45/open-pets.git
 cd open-pets
 
 # 三选一：phrolova / pink-star / rocom-dimo
-mkdir -p ~/.codex/pets/phrolova
-cp pets/phrolova/spritesheet.webp ~/.codex/pets/phrolova/
-cp pets/phrolova/pet.json         ~/.codex/pets/phrolova/
+mkdir -p ~/.codex/pets/rocom-dimo
+cp pets/rocom-dimo/spritesheet.webp ~/.codex/pets/rocom-dimo/
+cp pets/rocom-dimo/pet.json         ~/.codex/pets/rocom-dimo/
 
 # 然后在 Codex 里重新选一次宠物（或重启），让缩略图缓存刷掉
 ```
 
-### 路线 B：想用 AI agent 自己造宠物（推荐）
+> 💡 迪莫尚未上架 Petdex，目前只能用路线 B；后续上架后这里会同步更新。
+
+### 路线 C：想用 AI agent 自己造宠物（推荐给开发者）
 
 #### 第 1 步：安装 Skill
 

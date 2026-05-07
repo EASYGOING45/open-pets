@@ -21,26 +21,40 @@ The Skill is **deterministic packaging only** — it crops, alpha-cleans, repack
 
 Each pet ships as a 9-row × 8-column atlas covering all Codex states (`idle`, `running-right`, `running-left`, `waving`, `jumping`, `failed`, `waiting`, `running`, `review`).
 
-| Pet | Source | Preview |
-| --- | --- | --- |
-| **Phrolova** | *Wuthering Waves* fan tribute | [`pets/phrolova/spritesheet-repacked-preview.png`](pets/phrolova/spritesheet-repacked-preview.png) |
-| **Pink Star** (粉星仔) | *Roco World* fan tribute | [`pets/pink-star/spritesheet-repacked-preview.png`](pets/pink-star/spritesheet-repacked-preview.png) |
-| **Dimo** (迪莫) | *Roco World* fan tribute | [`pets/rocom-dimo/spritesheet-repacked-preview.png`](pets/rocom-dimo/spritesheet-repacked-preview.png) |
+| Pet | Source | Install via Petdex | Preview |
+| --- | --- | --- | --- |
+| **Phrolova** | *Wuthering Waves* fan tribute | [`npx petdex install phrolova`](https://petdex.crafter.run/zh/pets/phrolova) | [preview](pets/phrolova/spritesheet-repacked-preview.png) |
+| **Pink Star** (粉星仔) | *Roco World* fan tribute | [`npx petdex install pink-star`](https://petdex.crafter.run/zh/pets/pink-star) | [preview](pets/pink-star/spritesheet-repacked-preview.png) |
+| **Dimo** (迪莫) | *Roco World* fan tribute | _not yet on Petdex — manual only_ | [preview](pets/rocom-dimo/spritesheet-repacked-preview.png) |
 
 ## 🚀 Quick start — install a pet
 
-Pick a pet and drop its package into your runtime's pet directory:
+### Option A: One-line install via [Petdex](https://petdex.crafter.run/) (fastest)
+
+Phrolova and Pink Star are published on Petdex; no clone required:
 
 ```bash
-# For Codex CLI
-mkdir -p ~/.codex/pets/phrolova
-cp pets/phrolova/spritesheet.webp ~/.codex/pets/phrolova/
-cp pets/phrolova/pet.json         ~/.codex/pets/phrolova/
-
-# Then in Codex, reselect the pet (or restart) so the cached thumbnail is refreshed.
+npx petdex install phrolova
+npx petdex install pink-star
 ```
 
-Repeat for `pets/pink-star/` or `pets/rocom-dimo/`.
+Then in Codex: **Settings → Appearance → Pets → Custom pets**, select the pet, and run `/pet` to summon it.
+
+### Option B: Manual install (for Dimo, or offline / dev workflows)
+
+```bash
+git clone https://github.com/EASYGOING45/open-pets.git
+cd open-pets
+
+# Pick one: phrolova / pink-star / rocom-dimo
+mkdir -p ~/.codex/pets/rocom-dimo
+cp pets/rocom-dimo/spritesheet.webp ~/.codex/pets/rocom-dimo/
+cp pets/rocom-dimo/pet.json         ~/.codex/pets/rocom-dimo/
+
+# Then in Codex, reselect the pet (or restart) to refresh the cached thumbnail.
+```
+
+> Dimo is not yet on Petdex; this README will be updated when it lands.
 
 ## 🧰 Install the Skill
 
