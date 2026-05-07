@@ -12,7 +12,6 @@ body {
   overflow: hidden;
   user-select: none;
   -webkit-user-select: none;
-  -webkit-app-region: drag;
 }
 
 body {
@@ -24,6 +23,9 @@ body {
 #pet {
   display: block;
   image-rendering: pixelated;
-  -webkit-app-region: no-drag;
-  cursor: pointer;
+  cursor: grab;
+}
+
+#pet:active {
+  cursor: grabbing;
 }

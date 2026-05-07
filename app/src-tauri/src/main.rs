@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use tauri::{
     menu::{Menu, MenuItem},
     tray::TrayIconBuilder,
-    Builder, Manager,
+    Builder, LogicalPosition, Manager,
 };
 
 #[derive(Serialize, Clone)]
@@ -72,6 +72,7 @@ fn list_pets() -> Vec<Pet> {
             spritesheet: sheet.to_string_lossy().into_owned(),
         });
     }
+    pets.sort_by(|a, b| a.id.cmp(&b.id));
     pets
 }
 
@@ -100,6 +101,24 @@ fn main() {
     Builder::default()
         .setup(|app| {
             setup_tray(app)?;
+
+            if let Some(window) = app.get_webview_window("main") {
+                // Float over full-screen apps and follow the user across Spaces.
+                let _ = window.set_visible_on_all_workspaces(true);
+
+                // Park the pet in the bottom-right of the primary screen so it
+                // does not cover the user's working area on first launch.
+                if let Ok(Some(monitor)) = window.current_monitor() {
+                    let phys = monitor.size();
+                    let scale = monitor.scale_factor();
+                    let logical_w = phys.width as f64 / scale;
+                    let logical_h = phys.height as f64 / scale;
+                    let x = (logical_w - 256.0 - 40.0).max(0.0);
+                    let y = (logical_h - 256.0 - 100.0).max(0.0);
+                    let _ = window.set_position(LogicalPosition::new(x, y));
+                }
+            }
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![list_pets])

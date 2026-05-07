@@ -94,7 +94,32 @@ async function init() {
   img.src = convertFileSrc(pet.spritesheet);
 }
 
-// User input drives temporary state changes; idle is the resting state.
-document.body.addEventListener("click", () => setState("waving"));
+// Click-vs-drag disambiguation: a small mouse motion during press converts
+// the gesture into a window drag (handed off to the OS). A clean press
+// without movement triggers the waving animation.
+const appWindow = window.__TAURI__.window.getCurrentWindow();
+const DRAG_THRESHOLD_PX = 5;
+let pressStart = null;
+
+canvas.addEventListener("mousedown", (e) => {
+  pressStart = { x: e.clientX, y: e.clientY };
+});
+
+canvas.addEventListener("mousemove", (e) => {
+  if (!pressStart) return;
+  const dx = e.clientX - pressStart.x;
+  const dy = e.clientY - pressStart.y;
+  if (Math.abs(dx) > DRAG_THRESHOLD_PX || Math.abs(dy) > DRAG_THRESHOLD_PX) {
+    pressStart = null;
+    appWindow.startDragging();
+  }
+});
+
+canvas.addEventListener("click", () => {
+  if (pressStart) {
+    setState("waving");
+    pressStart = null;
+  }
+});
 
 init();
