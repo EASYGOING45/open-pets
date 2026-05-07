@@ -106,8 +106,8 @@ fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
 // level than the default `NSFloatingWindowLevel` set by `alwaysOnTop`.
 #[cfg(target_os = "macos")]
 fn pin_window_above_full_screen_apps(window: &tauri::WebviewWindow) {
-    use objc::runtime::{Object, BOOL, NO};
-    use objc::{msg_send, sel, sel_impl};
+    use objc::runtime::{object_setClass, Object, BOOL, NO};
+    use objc::{class, msg_send, sel, sel_impl};
 
     let ns_window_ptr = match window.ns_window() {
         Ok(ptr) => ptr,
@@ -118,23 +118,35 @@ fn pin_window_above_full_screen_apps(window: &tauri::WebviewWindow) {
     };
     let ns_window = ns_window_ptr as *mut Object;
 
-    // canJoinAllSpaces (1)         — visible in every Space, including full-screen.
-    // stationary (16)              — keep it pinned in place across Mission Control.
-    // ignoresCycle (64)            — Cmd+~ does not cycle through.
-    // fullScreenAuxiliary (256)    — empirically required on macOS 13+ for
-    //                                a non-NSPanel window to overlay other apps'
-    //                                full-screen Spaces, despite Apple's docs
-    //                                framing it as "auxiliary of a parent".
-    const COLLECTION_BEHAVIOR: u64 = 1 | 16 | 64 | 256;
+    // Promote the NSWindow to NSPanel. Plain NSWindow cannot overlay another
+    // app's full-screen Space on macOS 13+, even with the right collection-
+    // behavior flags and a screen-saver-level window level. NSPanel + the
+    // NSWindowStyleMaskNonactivatingPanel style mask is the canonical recipe
+    // (Bartender, Stickies, BetterDisplay, etc.).
+    //
+    // `object_setClass` swaps the live object's class. Since NSPanel is a
+    // subclass of NSWindow, no fields move; the object simply gains NSPanel's
+    // method dispatch.
+    let panel_class = class!(NSPanel);
+    unsafe { object_setClass(ns_window, panel_class) };
 
-    // NSScreenSaverWindowLevel = 1000. Same level overlay apps (Bartender etc.) use.
+    // NSWindowStyleMaskNonactivatingPanel = 1 << 7 = 128.
+    // Keep whatever bits Tauri already set (transparent / borderless / etc.).
+    let style_mask: u64 = unsafe { msg_send![ns_window, styleMask] };
+    let new_style_mask = style_mask | 128;
+    unsafe { let _: () = msg_send![ns_window, setStyleMask: new_style_mask]; }
+
+    // canJoinAllSpaces (1) | stationary (16) | ignoresCycle (64) | fullScreenAuxiliary (256)
+    const COLLECTION_BEHAVIOR: u64 = 1 | 16 | 64 | 256;
+    // NSScreenSaverWindowLevel = 1000.
     const WINDOW_LEVEL: i64 = 1000;
 
     let prev_behavior: u64 = unsafe { msg_send![ns_window, collectionBehavior] };
     let prev_level: i64 = unsafe { msg_send![ns_window, level] };
     let prev_on_active_space: BOOL = unsafe { msg_send![ns_window, isOnActiveSpace] };
     eprintln!(
-        "[OpenPets] before: behavior={prev_behavior} level={prev_level} onActiveSpace={}",
+        "[OpenPets] before: behavior={prev_behavior} level={prev_level} \
+         styleMask={style_mask} onActiveSpace={}",
         prev_on_active_space != NO
     );
 
@@ -145,9 +157,11 @@ fn pin_window_above_full_screen_apps(window: &tauri::WebviewWindow) {
 
     let now_behavior: u64 = unsafe { msg_send![ns_window, collectionBehavior] };
     let now_level: i64 = unsafe { msg_send![ns_window, level] };
+    let now_style_mask: u64 = unsafe { msg_send![ns_window, styleMask] };
     let now_on_active_space: BOOL = unsafe { msg_send![ns_window, isOnActiveSpace] };
     eprintln!(
-        "[OpenPets] after:  behavior={now_behavior} level={now_level} onActiveSpace={}",
+        "[OpenPets] after:  behavior={now_behavior} level={now_level} \
+         styleMask={now_style_mask} onActiveSpace={} (now NSPanel)",
         now_on_active_space != NO
     );
 }
