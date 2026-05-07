@@ -106,8 +106,13 @@ fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
 // level than the default `NSFloatingWindowLevel` set by `alwaysOnTop`.
 #[cfg(target_os = "macos")]
 fn pin_window_above_full_screen_apps(window: &tauri::WebviewWindow) {
-    use objc::runtime::{object_setClass, Object, BOOL, NO};
+    use objc::runtime::{Class, Object, BOOL, NO};
     use objc::{class, msg_send, sel, sel_impl};
+
+    // objc 0.2 doesn't bind the C runtime's object_setClass; declare it manually.
+    extern "C" {
+        fn object_setClass(obj: *mut Object, cls: *const Class) -> *const Class;
+    }
 
     let ns_window_ptr = match window.ns_window() {
         Ok(ptr) => ptr,
@@ -127,8 +132,8 @@ fn pin_window_above_full_screen_apps(window: &tauri::WebviewWindow) {
     // `object_setClass` swaps the live object's class. Since NSPanel is a
     // subclass of NSWindow, no fields move; the object simply gains NSPanel's
     // method dispatch.
-    let panel_class = class!(NSPanel);
-    unsafe { object_setClass(ns_window, panel_class) };
+    let panel_class: &Class = class!(NSPanel);
+    unsafe { object_setClass(ns_window, panel_class as *const Class) };
 
     // NSWindowStyleMaskNonactivatingPanel = 1 << 7 = 128.
     // Keep whatever bits Tauri already set (transparent / borderless / etc.).
