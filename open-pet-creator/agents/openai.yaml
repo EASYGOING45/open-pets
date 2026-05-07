@@ -1,0 +1,4 @@
+interface:
+  display_name: "Open Pet Creator"
+  short_description: "Build and repair Codex pet atlases"
+  default_prompt: "Use $open-pet-creator to create or repair a Codex pet spritesheet."
