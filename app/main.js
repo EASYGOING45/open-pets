@@ -94,32 +94,10 @@ async function init() {
   img.src = convertFileSrc(pet.spritesheet);
 }
 
-// Click-vs-drag disambiguation: a small mouse motion during press converts
-// the gesture into a window drag (handed off to the OS). A clean press
-// without movement triggers the waving animation.
-const appWindow = window.__TAURI__.window.getCurrentWindow();
-const DRAG_THRESHOLD_PX = 5;
-let pressStart = null;
-
-canvas.addEventListener("mousedown", (e) => {
-  pressStart = { x: e.clientX, y: e.clientY };
-});
-
-canvas.addEventListener("mousemove", (e) => {
-  if (!pressStart) return;
-  const dx = e.clientX - pressStart.x;
-  const dy = e.clientY - pressStart.y;
-  if (Math.abs(dx) > DRAG_THRESHOLD_PX || Math.abs(dy) > DRAG_THRESHOLD_PX) {
-    pressStart = null;
-    appWindow.startDragging();
-  }
-});
-
-canvas.addEventListener("click", () => {
-  if (pressStart) {
-    setState("waving");
-    pressStart = null;
-  }
-});
+// Drag is handled by Tauri's native `data-tauri-drag-region` attribute on the
+// canvas (set in index.html): mousedown + movement → OS-level window drag.
+// A clean press without movement still fires the click event, so we just bind
+// the wave animation to that.
+canvas.addEventListener("click", () => setState("waving"));
 
 init();

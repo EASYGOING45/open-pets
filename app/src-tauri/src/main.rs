@@ -97,14 +97,47 @@ fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
     Ok(())
 }
 
+// Pin the window to a level above full-screen apps and make it visible across
+// every Space (regular desktops AND full-screen Spaces). Tauri's
+// `set_visible_on_all_workspaces` only sets `canJoinAllSpaces`, which is not
+// enough on macOS — we also need `fullScreenAuxiliary` and a higher window
+// level than the default `NSFloatingWindowLevel` set by `alwaysOnTop`.
+#[cfg(target_os = "macos")]
+fn pin_window_above_full_screen_apps(window: &tauri::WebviewWindow) {
+    use objc::runtime::Object;
+    use objc::{msg_send, sel, sel_impl};
+
+    let Ok(ns_window_ptr) = window.ns_window() else {
+        return;
+    };
+    let ns_window = ns_window_ptr as *mut Object;
+
+    // NSWindowCollectionBehavior bitmask:
+    //   NSWindowCollectionBehaviorCanJoinAllSpaces    = 1 << 0 = 1
+    //   NSWindowCollectionBehaviorIgnoresCycle        = 1 << 6 = 64
+    //   NSWindowCollectionBehaviorFullScreenAuxiliary = 1 << 8 = 256
+    const COLLECTION_BEHAVIOR: u64 = 1 | 64 | 256;
+
+    // NSStatusWindowLevel = 25. Higher than NSFloatingWindowLevel (3), low
+    // enough to stay below screen-saver / system alerts.
+    const WINDOW_LEVEL: i64 = 25;
+
+    unsafe {
+        let _: () = msg_send![ns_window, setCollectionBehavior: COLLECTION_BEHAVIOR];
+        let _: () = msg_send![ns_window, setLevel: WINDOW_LEVEL];
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn pin_window_above_full_screen_apps(_window: &tauri::WebviewWindow) {}
+
 fn main() {
     Builder::default()
         .setup(|app| {
             setup_tray(app)?;
 
             if let Some(window) = app.get_webview_window("main") {
-                // Float over full-screen apps and follow the user across Spaces.
-                let _ = window.set_visible_on_all_workspaces(true);
+                pin_window_above_full_screen_apps(&window);
 
                 // Park the pet in the bottom-right of the primary screen so it
                 // does not cover the user's working area on first launch.
