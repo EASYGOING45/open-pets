@@ -106,10 +106,8 @@ fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
 // level than the default `NSFloatingWindowLevel` set by `alwaysOnTop`.
 #[cfg(target_os = "macos")]
 fn pin_window_above_full_screen_apps(window: &tauri::WebviewWindow) {
-    use objc::runtime::Object;
+    use objc::runtime::{Object, BOOL, NO};
     use objc::{msg_send, sel, sel_impl};
-
-    eprintln!("[OpenPets] pin_window_above_full_screen_apps: entering");
 
     let ns_window_ptr = match window.ns_window() {
         Ok(ptr) => ptr,
@@ -118,27 +116,27 @@ fn pin_window_above_full_screen_apps(window: &tauri::WebviewWindow) {
             return;
         }
     };
-    eprintln!("[OpenPets] ns_window ptr = {:p}", ns_window_ptr);
     let ns_window = ns_window_ptr as *mut Object;
 
-    // Read what Tauri / tao set so we can diagnose conflicts. Defaults often
-    // include NSWindowCollectionBehaviorManaged (4), which is mutually
-    // exclusive with canJoinAllSpaces.
+    // canJoinAllSpaces (1)         — visible in every Space, including full-screen.
+    // stationary (16)              — keep it pinned in place across Mission Control.
+    // ignoresCycle (64)            — Cmd+~ does not cycle through.
+    // fullScreenAuxiliary (256)    — empirically required on macOS 13+ for
+    //                                a non-NSPanel window to overlay other apps'
+    //                                full-screen Spaces, despite Apple's docs
+    //                                framing it as "auxiliary of a parent".
+    const COLLECTION_BEHAVIOR: u64 = 1 | 16 | 64 | 256;
+
+    // NSScreenSaverWindowLevel = 1000. Same level overlay apps (Bartender etc.) use.
+    const WINDOW_LEVEL: i64 = 1000;
+
     let prev_behavior: u64 = unsafe { msg_send![ns_window, collectionBehavior] };
     let prev_level: i64 = unsafe { msg_send![ns_window, level] };
+    let prev_on_active_space: BOOL = unsafe { msg_send![ns_window, isOnActiveSpace] };
     eprintln!(
-        "[OpenPets] previous collectionBehavior={prev_behavior} level={prev_level}"
+        "[OpenPets] before: behavior={prev_behavior} level={prev_level} onActiveSpace={}",
+        prev_on_active_space != NO
     );
-
-    // canJoinAllSpaces (1) — visible in every Space, including full-screen Spaces.
-    //   ignoresCycle  (64) — Cmd+~ does not cycle through it.
-    // Drop fullScreenAuxiliary; that flag is for parent-attached palettes, not
-    // generic "always-visible" overlays.
-    const COLLECTION_BEHAVIOR: u64 = 1 | 64;
-
-    // NSScreenSaverWindowLevel = 1000. Same level Bartender / Stickies-style
-    // overlays use; reliably stays above app windows including full-screen.
-    const WINDOW_LEVEL: i64 = 1000;
 
     unsafe {
         let _: () = msg_send![ns_window, setCollectionBehavior: COLLECTION_BEHAVIOR];
@@ -147,8 +145,10 @@ fn pin_window_above_full_screen_apps(window: &tauri::WebviewWindow) {
 
     let now_behavior: u64 = unsafe { msg_send![ns_window, collectionBehavior] };
     let now_level: i64 = unsafe { msg_send![ns_window, level] };
+    let now_on_active_space: BOOL = unsafe { msg_send![ns_window, isOnActiveSpace] };
     eprintln!(
-        "[OpenPets] now collectionBehavior={now_behavior} level={now_level}"
+        "[OpenPets] after:  behavior={now_behavior} level={now_level} onActiveSpace={}",
+        now_on_active_space != NO
     );
 }
 
@@ -168,6 +168,17 @@ fn main() {
 
             if let Some(window) = app.get_webview_window("main") {
                 pin_window_above_full_screen_apps(&window);
+
+                // Reapply the pin on focus events. If macOS reverts the
+                // collection behavior when the window crosses Spaces (some
+                // versions do), this catches it.
+                let win = window.clone();
+                window.on_window_event(move |event| {
+                    if let tauri::WindowEvent::Focused(true) = event {
+                        eprintln!("[OpenPets] focus event → reapplying pin");
+                        pin_window_above_full_screen_apps(&win);
+                    }
+                });
 
                 // Park the pet in the bottom-right of the primary screen so it
                 // does not cover the user's working area on first launch.
