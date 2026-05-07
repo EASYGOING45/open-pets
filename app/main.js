@@ -5,6 +5,7 @@
 // open-pet-creator Skill.
 
 const { invoke, convertFileSrc } = window.__TAURI__.core;
+const { listen } = window.__TAURI__.event;
 
 const CELL_W = 192;
 const CELL_H = 208;
@@ -24,7 +25,7 @@ const STATES = {
 
 const canvas = document.getElementById("pet");
 const ctx = canvas.getContext("2d");
-const img = new Image();
+let img = new Image();
 
 let state = "idle";
 let frame = 0;
@@ -38,6 +39,7 @@ function setState(name) {
 }
 
 function draw() {
+  if (!img.complete || img.naturalWidth === 0) return;
   const s = STATES[state];
   ctx.clearRect(0, 0, CELL_W, CELL_H);
   ctx.drawImage(
@@ -72,7 +74,34 @@ function tick(now) {
   requestAnimationFrame(tick);
 }
 
+let animationStarted = false;
+
+// Load the new atlas into a fresh Image first; only swap `img` once it's
+// fully decoded. This avoids a flicker when the user switches pets via the
+// picker and the canvas would otherwise try to draw a half-loaded image.
+function loadPet(pet) {
+  console.log(`OpenPets: loading ${pet.display_name} (${pet.id})`);
+  const next = new Image();
+  next.onload = () => {
+    img = next;
+    setState("idle");
+    draw();
+    if (!animationStarted) {
+      animationStarted = true;
+      requestAnimationFrame(tick);
+    }
+  };
+  next.onerror = (e) =>
+    console.error(`OpenPets: failed to load atlas for ${pet.id}`, e);
+  next.src = convertFileSrc(pet.spritesheet);
+}
+
 async function init() {
+  // Subscribe before the first activation so we never miss the initial event.
+  await listen("pet-changed", (event) => {
+    if (event.payload) loadPet(event.payload);
+  });
+
   const pets = await invoke("list_pets");
   if (pets.length === 0) {
     console.warn(
@@ -82,16 +111,9 @@ async function init() {
     return;
   }
 
-  // For Phase 1 MVP we just pick the first available pet.
-  const pet = pets[0];
-  console.log(`OpenPets: loading ${pet.display_name} (${pet.id})`);
-
-  img.onload = () => {
-    draw();
-    requestAnimationFrame(tick);
-  };
-  img.onerror = (e) => console.error("OpenPets: failed to load atlas", e);
-  img.src = convertFileSrc(pet.spritesheet);
+  // Default to the first pet; `set_active_pet` also stores it as the active
+  // selection so the picker window can highlight it correctly.
+  await invoke("set_active_pet", { id: pets[0].id });
 }
 
 // Window drag is invoked explicitly via a Rust command on mousedown. The OS

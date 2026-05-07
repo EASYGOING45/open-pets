@@ -6,11 +6,18 @@
 use serde::Serialize;
 use std::fs;
 use std::path::PathBuf;
+use std::sync::Mutex;
 use tauri::{
-    menu::{Menu, MenuItem},
+    menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::TrayIconBuilder,
-    Builder, LogicalPosition, Manager,
+    AppHandle, Builder, Emitter, LogicalPosition, Manager, State, WebviewUrl,
+    WebviewWindowBuilder, WindowEvent,
 };
+
+#[derive(Default)]
+struct AppState {
+    active_pet_id: Mutex<Option<String>>,
+}
 
 #[derive(Serialize, Clone)]
 struct Pet {
@@ -78,9 +85,32 @@ fn list_pets() -> Vec<Pet> {
     pets
 }
 
-fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
+fn setup_tray(app: &tauri::App, pets: &[Pet]) -> tauri::Result<()> {
+    let menu = Menu::new(app)?;
+
+    // One menu entry per installed pet — clicking switches the active pet.
+    for pet in pets {
+        let item = MenuItem::with_id(
+            app,
+            format!("pet:{}", pet.id),
+            &pet.display_name,
+            true,
+            None::<&str>,
+        )?;
+        menu.append(&item)?;
+    }
+
+    if !pets.is_empty() {
+        menu.append(&PredefinedMenuItem::separator(app)?)?;
+    }
+
+    let picker = MenuItem::with_id(app, "picker", "Choose Pet…", true, None::<&str>)?;
+    menu.append(&picker)?;
+
+    menu.append(&PredefinedMenuItem::separator(app)?)?;
+
     let quit = MenuItem::with_id(app, "quit", "Quit OpenPets", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&quit])?;
+    menu.append(&quit)?;
 
     let icon = app
         .default_window_icon()
@@ -90,12 +120,73 @@ fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
     TrayIconBuilder::new()
         .menu(&menu)
         .icon(icon)
-        .on_menu_event(|app, event| {
-            if event.id == "quit" {
-                app.exit(0);
-            }
-        })
+        .on_menu_event(handle_tray_event)
         .build(app)?;
+    Ok(())
+}
+
+fn handle_tray_event(app: &AppHandle, event: tauri::menu::MenuEvent) {
+    let id = event.id.as_ref();
+    if id == "quit" {
+        app.exit(0);
+    } else if id == "picker" {
+        if let Err(e) = show_picker_window(app) {
+            eprintln!("[OpenPets] failed to open picker: {e}");
+        }
+    } else if let Some(pet_id) = id.strip_prefix("pet:") {
+        activate_pet(app, pet_id);
+    }
+}
+
+fn activate_pet(app: &AppHandle, pet_id: &str) {
+    let pets = list_pets();
+    let Some(pet) = pets.into_iter().find(|p| p.id == pet_id) else {
+        eprintln!("[OpenPets] activate_pet: '{pet_id}' not found");
+        return;
+    };
+    if let Some(state) = app.try_state::<AppState>() {
+        if let Ok(mut g) = state.active_pet_id.lock() {
+            *g = Some(pet.id.clone());
+        }
+    }
+    if let Err(e) = app.emit("pet-changed", &pet) {
+        eprintln!("[OpenPets] emit pet-changed failed: {e}");
+    }
+}
+
+fn show_picker_window(app: &AppHandle) -> tauri::Result<()> {
+    if let Some(window) = app.get_webview_window("picker") {
+        window.show()?;
+        window.set_focus()?;
+        return Ok(());
+    }
+
+    let window = WebviewWindowBuilder::new(
+        app,
+        "picker",
+        WebviewUrl::App("picker.html".into()),
+    )
+    .title("Choose Pet")
+    .inner_size(400.0, 240.0)
+    .resizable(false)
+    .decorations(false)
+    .transparent(true)
+    .always_on_top(true)
+    .skip_taskbar(true)
+    .shadow(false)
+    .center()
+    .build()?;
+
+    pin_window_above_full_screen_apps(&window);
+
+    // Auto-hide when the user clicks elsewhere (lost focus).
+    let win = window.clone();
+    window.on_window_event(move |event| {
+        if let WindowEvent::Focused(false) = event {
+            let _ = win.hide();
+        }
+    });
+
     Ok(())
 }
 
@@ -180,10 +271,34 @@ fn start_drag(window: tauri::WebviewWindow) -> Result<(), String> {
     window.start_dragging().map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+fn get_active_pet(state: State<AppState>) -> Option<Pet> {
+    let id = state.active_pet_id.lock().ok()?.clone()?;
+    list_pets().into_iter().find(|p| p.id == id)
+}
+
+#[tauri::command]
+fn set_active_pet(id: String, app: AppHandle) -> Result<Pet, String> {
+    let pet = list_pets()
+        .into_iter()
+        .find(|p| p.id == id)
+        .ok_or_else(|| format!("pet '{id}' not found"))?;
+    if let Some(state) = app.try_state::<AppState>() {
+        *state
+            .active_pet_id
+            .lock()
+            .map_err(|e| e.to_string())? = Some(pet.id.clone());
+    }
+    app.emit("pet-changed", &pet).map_err(|e| e.to_string())?;
+    Ok(pet)
+}
+
 fn main() {
     Builder::default()
+        .manage(AppState::default())
         .setup(|app| {
-            setup_tray(app)?;
+            let pets = list_pets();
+            setup_tray(app, &pets)?;
 
             if let Some(window) = app.get_webview_window("main") {
                 pin_window_above_full_screen_apps(&window);
@@ -214,7 +329,12 @@ fn main() {
 
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![list_pets, start_drag])
+        .invoke_handler(tauri::generate_handler![
+            list_pets,
+            get_active_pet,
+            set_active_pet,
+            start_drag,
+        ])
         .run(tauri::generate_context!())
         .expect("failed to run OpenPets");
 }
