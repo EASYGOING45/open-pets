@@ -121,23 +121,34 @@ fn pin_window_above_full_screen_apps(window: &tauri::WebviewWindow) {
     eprintln!("[OpenPets] ns_window ptr = {:p}", ns_window_ptr);
     let ns_window = ns_window_ptr as *mut Object;
 
-    // NSWindowCollectionBehavior bitmask:
-    //   NSWindowCollectionBehaviorCanJoinAllSpaces    = 1 << 0 = 1
-    //   NSWindowCollectionBehaviorIgnoresCycle        = 1 << 6 = 64
-    //   NSWindowCollectionBehaviorFullScreenAuxiliary = 1 << 8 = 256
-    const COLLECTION_BEHAVIOR: u64 = 1 | 64 | 256;
+    // Read what Tauri / tao set so we can diagnose conflicts. Defaults often
+    // include NSWindowCollectionBehaviorManaged (4), which is mutually
+    // exclusive with canJoinAllSpaces.
+    let prev_behavior: u64 = unsafe { msg_send![ns_window, collectionBehavior] };
+    let prev_level: i64 = unsafe { msg_send![ns_window, level] };
+    eprintln!(
+        "[OpenPets] previous collectionBehavior={prev_behavior} level={prev_level}"
+    );
 
-    // NSStatusWindowLevel = 25. Higher than NSFloatingWindowLevel (3), low
-    // enough to stay below screen-saver / system alerts.
-    const WINDOW_LEVEL: i64 = 25;
+    // canJoinAllSpaces (1) — visible in every Space, including full-screen Spaces.
+    //   ignoresCycle  (64) — Cmd+~ does not cycle through it.
+    // Drop fullScreenAuxiliary; that flag is for parent-attached palettes, not
+    // generic "always-visible" overlays.
+    const COLLECTION_BEHAVIOR: u64 = 1 | 64;
+
+    // NSScreenSaverWindowLevel = 1000. Same level Bartender / Stickies-style
+    // overlays use; reliably stays above app windows including full-screen.
+    const WINDOW_LEVEL: i64 = 1000;
 
     unsafe {
         let _: () = msg_send![ns_window, setCollectionBehavior: COLLECTION_BEHAVIOR];
         let _: () = msg_send![ns_window, setLevel: WINDOW_LEVEL];
     }
 
+    let now_behavior: u64 = unsafe { msg_send![ns_window, collectionBehavior] };
+    let now_level: i64 = unsafe { msg_send![ns_window, level] };
     eprintln!(
-        "[OpenPets] applied collection_behavior={COLLECTION_BEHAVIOR} level={WINDOW_LEVEL}"
+        "[OpenPets] now collectionBehavior={now_behavior} level={now_level}"
     );
 }
 
