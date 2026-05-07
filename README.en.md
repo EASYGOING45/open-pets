@@ -144,7 +144,7 @@ Both are documented in `open-pet-creator/SKILL.md`.
 This is a **fan project** for personal desktop customization. All character likenesses are tributes to their original creators:
 
 - **Phrolova** — *Wuthering Waves* (KURO GAMES). © Kuro Games.
-- **粉星仔 / Pink Star** and **迪莫 / Dimo** — *Roco World / 洛克王国* (TaoMee). © TaoMee.
+- **粉星仔 / Pink Star** and **迪莫 / Dimo** — *Roco World / 洛克王国* (Tencent). © Tencent.
 
 The reusable code in `open-pet-creator/`, `tools/`, `tests/`, and the design-doc/prompt templates in `docs/` are project-original. If you are an IP rightsholder and would like a specific pet package taken down, please open an issue.
 

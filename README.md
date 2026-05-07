@@ -253,7 +253,7 @@ open-pets/
 这是一个**同人项目**，目的是个人桌面定制。所有角色形象致敬原作者：
 
 - **Phrolova** —— *鸣潮 / Wuthering Waves* © Kuro Games
-- **粉星仔 / Pink Star** 与 **迪莫 / Dimo** —— *洛克王国 / Roco World* © TaoMee
+- **粉星仔 / Pink Star** 与 **迪莫 / Dimo** —— *洛克王国 / Roco World* © 腾讯 / Tencent
 
 `open-pet-creator/`、`tools/`、`tests/`、`docs/` 中的代码与模板均为项目原创。**若您是版权方且希望下架某只具体宠物包，请提 issue 联系，会尽快配合移除。**
 
