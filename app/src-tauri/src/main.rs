@@ -1,5 +1,7 @@
 // Prevents additional console window on Windows in release; do nothing on macOS / Linux.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+// objc 0.2 macros emit deprecated cfg lints on modern rustc; harmless.
+#![allow(unexpected_cfgs)]
 
 use serde::Serialize;
 use std::fs;
@@ -107,9 +109,16 @@ fn pin_window_above_full_screen_apps(window: &tauri::WebviewWindow) {
     use objc::runtime::Object;
     use objc::{msg_send, sel, sel_impl};
 
-    let Ok(ns_window_ptr) = window.ns_window() else {
-        return;
+    eprintln!("[OpenPets] pin_window_above_full_screen_apps: entering");
+
+    let ns_window_ptr = match window.ns_window() {
+        Ok(ptr) => ptr,
+        Err(e) => {
+            eprintln!("[OpenPets] ns_window() failed: {e}");
+            return;
+        }
     };
+    eprintln!("[OpenPets] ns_window ptr = {:p}", ns_window_ptr);
     let ns_window = ns_window_ptr as *mut Object;
 
     // NSWindowCollectionBehavior bitmask:
@@ -126,10 +135,20 @@ fn pin_window_above_full_screen_apps(window: &tauri::WebviewWindow) {
         let _: () = msg_send![ns_window, setCollectionBehavior: COLLECTION_BEHAVIOR];
         let _: () = msg_send![ns_window, setLevel: WINDOW_LEVEL];
     }
+
+    eprintln!(
+        "[OpenPets] applied collection_behavior={COLLECTION_BEHAVIOR} level={WINDOW_LEVEL}"
+    );
 }
 
 #[cfg(not(target_os = "macos"))]
 fn pin_window_above_full_screen_apps(_window: &tauri::WebviewWindow) {}
+
+#[tauri::command]
+fn start_drag(window: tauri::WebviewWindow) -> Result<(), String> {
+    eprintln!("[OpenPets] start_drag invoked");
+    window.start_dragging().map_err(|e| e.to_string())
+}
 
 fn main() {
     Builder::default()
@@ -154,7 +173,7 @@ fn main() {
 
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![list_pets])
+        .invoke_handler(tauri::generate_handler![list_pets, start_drag])
         .run(tauri::generate_context!())
         .expect("failed to run OpenPets");
 }

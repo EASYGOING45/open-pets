@@ -94,10 +94,14 @@ async function init() {
   img.src = convertFileSrc(pet.spritesheet);
 }
 
-// Drag is handled by Tauri's native `data-tauri-drag-region` attribute on the
-// canvas (set in index.html): mousedown + movement → OS-level window drag.
-// A clean press without movement still fires the click event, so we just bind
-// the wave animation to that.
+// Window drag is invoked explicitly via a Rust command on mousedown. The OS
+// then takes over the gesture: short presses without movement fall through
+// to the `click` event (→ wave); presses with movement become a window drag.
+canvas.addEventListener("mousedown", (e) => {
+  if (e.button !== 0) return;
+  invoke("start_drag").catch((err) => console.error("start_drag failed:", err));
+});
+
 canvas.addEventListener("click", () => setState("waving"));
 
 init();
