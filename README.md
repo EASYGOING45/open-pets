@@ -87,39 +87,31 @@
 
 ---
 
-## 🚀 快速开始
+## 🎯 核心工作流：用 Skill 造一只你想要的宠物
 
-### 路线 A：用 Petdex 一行命令装好（最快，已上架 Petdex 的宠物）
+> **整个流程的主语都是 Skill。** 你只描述想做什么，剩下的"写提示词 → 等你生图 → 切帧打包 → 安装"全部由 Skill 驱动 agent 自动完成。
 
-[Phrolova](https://petdex.crafter.run/zh/pets/phrolova) 与 [Pink Star](https://petdex.crafter.run/zh/pets/pink-star) 已上架 [Petdex](https://petdex.crafter.run/)，无需 clone 仓库：
+```mermaid
+sequenceDiagram
+    autonumber
+    actor U as 你
+    participant A as Codex / Claude Code agent
+    participant S as open-pet-creator<br/>Skill
+    participant G as gpt-image / Midjourney<br/>/ SDXL
 
-```bash
-# 任选其一，命令会自动下载并放到 ~/.codex/pets/
-npx petdex install phrolova
-npx petdex install pink-star
+    U->>A: "我想做一只 X 的桌面宠物"
+    A->>S: 自动加载 Skill
+    S-->>U: 输出针对 X 的设计文档<br/>+ 可粘贴的 Final Prompt
+    U->>G: 把提示词喂给图像生成器
+    G-->>U: 8×8 网格源图 PNG
+    U->>A: "源图好了，在 ~/Downloads/x.png"
+    A->>S: 调 repack → inspect → validate → install
+    S-->>U: ✅ 1536×1872 原子图已生成<br/>✅ 已装到 ~/.codex/pets/x/
 ```
 
-装完后在 Codex 里：**Settings → Appearance → Pets → Custom pets → 选中宠物**，然后输入 `/pet` 召唤即可。
+### 第 1 步 · 把 Skill 装进 agent 工具
 
-### 路线 B：手动安装（适合迪莫，或离线/开发场景）
-
-```bash
-git clone https://github.com/EASYGOING45/open-pets.git
-cd open-pets
-
-# 三选一：phrolova / pink-star / rocom-dimo
-mkdir -p ~/.codex/pets/rocom-dimo
-cp pets/rocom-dimo/spritesheet.webp ~/.codex/pets/rocom-dimo/
-cp pets/rocom-dimo/pet.json         ~/.codex/pets/rocom-dimo/
-
-# 然后在 Codex 里重新选一次宠物（或重启），让缩略图缓存刷掉
-```
-
-> 💡 迪莫尚未上架 Petdex，目前只能用路线 B；后续上架后这里会同步更新。
-
-### 路线 C：想用 AI agent 自己造宠物（推荐给开发者）
-
-#### 第 1 步：安装 Skill
+一次安装、Codex 与 Claude Code 通用：
 
 ```bash
 # Codex CLI
@@ -129,19 +121,88 @@ cp -R open-pet-creator ~/.codex/skills/open-pet-creator
 cp -R open-pet-creator ~/.claude/skills/open-pet-creator
 ```
 
-#### 第 2 步：让 agent 帮你做剩下的事
+> 安装好后无需手动调用——agent 看到"我想做 Codex 宠物"这类需求时会**自动加载** Skill。
 
-接下来直接对 agent 描述需求即可，Skill 会被自动加载：
+### 第 2 步 · 告诉 agent 想要哪只，Skill 给你写提示词
 
-> 👤 **你**：我刚用 Midjourney 生成了一张精灵图，想做成 Codex 桌面宠物，源图在 `~/Downloads/dimo-source.png`
+> 👤 **你**："我想做一只皮卡丘的 Codex 桌面宠物。"
 >
 > 🤖 **Claude Code**（自动加载 `open-pet-creator` Skill）：
-> 好的。源图来自图像生成器，先走 `--detect-sprites` 模式重排……
-> ✅ Repack 完成：1536×1872 RGBA WebP，9 行全部通过协议校验
-> ✅ Inspect：所有行 `top_min ≥ 38`，idle bbox 落在推荐区间
-> 是否同步到 `~/.codex/pets/dimo/`？
+> 好的，我按 Skill 里的设计模板帮你写一份针对皮卡丘的设计文档与生成提示词，包含每行姿势规格、配色约束、签名特征……
+>
+> ✏️ 已生成：
+> - `docs/pikachu-pet-design.md`（设计文档）
+> - `docs/pikachu-generation-prompt.md`（含可直接粘贴的 **Final Prompt** 块）
+>
+> 拿这段 Final Prompt 去图像生成器跑一次，得到 1536×1664 的 8×8 网格源图（纯黑底），然后告诉我源图位置即可。
 
-> 💡 这是示意性对话。实际 agent 会按 Skill 里写的步骤跑 `repack_pet_atlas.py` → `inspect_pet_atlas.py` → `validate_pet_atlas.py` → `install_pet.py`。
+> 💡 **Skill 携带的领域知识让提示词不踩坑**：每行需要几帧、姿势如何描述、为什么要黑底（自动 alpha 抽取）、为什么要 8×8 网格（匹配 Codex 协议），全在 SKILL.md 里写好了。
+
+### 第 3 步 · 用任意图像生成器跑出源图
+
+把上一步拿到的 **Final Prompt** 粘贴到任意一种生成器：
+
+| 工具 | 入口 | 特点 |
+| --- | --- | --- |
+| **OpenAI gpt-image-1 / GPT-4o Image** | API 或 ChatGPT 内 Image | 指令遵循度最好，**首选** |
+| **Midjourney v6+** | Discord / Web | 角色一致性最强；网格可能要分行跑 |
+| **SDXL + chibi LoRA** | Automatic1111 / ComfyUI | 适合本地化定制 |
+
+> 💡 **一致性差**就分行单独跑再合并——Skill 的提示词模板里已经写了这个回退方案。
+
+### 第 4 步 · 把源图交回 agent，Skill 帮你完成剩下所有事
+
+源图存为 `pets/<pet>/spritesheet-source.png` 后告诉 agent：
+
+> 👤 **你**："源图好了，在 `pets/pikachu/spritesheet-source.png`。"
+>
+> 🤖 **Claude Code**（继续用 `open-pet-creator` Skill）：
+> 收到。源图来自图像生成器，按 Skill 规则自动启用 `--detect-sprites`（生成器源图列宽不齐的兜底）……
+>
+> ✅ **Repack**：1536×1872 RGBA WebP，全部 9 行通过 Codex 协议
+> ✅ **Validate**：format / mode / 网格契约全部命中
+> ✅ **Inspect**：所有行 `top_min ≥ 38`，idle bbox `121×155` 在推荐区间
+>
+> 是否同步到 `~/.codex/pets/pikachu/`？
+
+> 💡 **调参规则也已沉淀进 Skill**：从保守的 `--scale 0.98` 起步、生成器源图必走 `--detect-sprites`、`top_min < 35` 时自动加 `--offset-y` —— 这些都不需要你记。
+
+### 第 5 步 · Codex 召唤
+
+```text
+Codex Settings → Appearance → Pets → Custom pets → 选中你的宠物 → 输入 /pet
+```
+
+整个流程通常 **15–30 分钟**（瓶颈是图像生成器迭代速度）。Skill 抽走了所有重复劳动——写约束文档、记得切 `--detect-sprites`、调 `--scale/--offset-y`、跑契约校验、避免踩同样的坑。
+
+---
+
+## 🐾 想直接装现成的几只？
+
+不想自己造也完全可以——三只示范宠物已经做好：
+
+### 路线 A · 用 [Petdex](https://petdex.crafter.run/) 一行命令装好（最快）
+
+[Phrolova](https://petdex.crafter.run/zh/pets/phrolova) 与 [Pink Star](https://petdex.crafter.run/zh/pets/pink-star) 已上架 Petdex：
+
+```bash
+npx petdex install phrolova
+npx petdex install pink-star
+```
+
+装完后：**Codex Settings → Appearance → Pets → Custom pets → 选中宠物**，输入 `/pet` 召唤。
+
+### 路线 B · 手动安装（适合迪莫，或离线/开发场景）
+
+```bash
+git clone https://github.com/EASYGOING45/open-pets.git
+cd open-pets
+mkdir -p ~/.codex/pets/rocom-dimo
+cp pets/rocom-dimo/spritesheet.webp ~/.codex/pets/rocom-dimo/
+cp pets/rocom-dimo/pet.json         ~/.codex/pets/rocom-dimo/
+```
+
+> 💡 迪莫尚未上架 Petdex，目前只能手动安装；后续上架后这里会同步更新。
 
 ---
 
@@ -178,30 +239,7 @@ cp -R open-pet-creator ~/.claude/skills/open-pet-creator
 
 详细使用说明见 [`open-pet-creator/SKILL.md`](open-pet-creator/SKILL.md)，原子图契约见 [`references/codex-pet-atlas.md`](open-pet-creator/references/codex-pet-atlas.md)。
 
----
-
-## 🎨 自制一只新宠物（30 分钟全流程）
-
-```mermaid
-flowchart LR
-    A[1.设计] --> B[2.写提示词]
-    B --> C[3.生成源图]
-    C --> D[4.重排]
-    D --> E[5.检视/校验]
-    E -->|不满意| D
-    E -->|OK| F[6.安装]
-```
-
-| 步骤 | 操作 | 文件参考 |
-| ---: | --- | --- |
-| 1 | **设计** —— 描述配色、辨识特征、每行姿势 | [`docs/rocom-dimo-pet-design.md`](docs/rocom-dimo-pet-design.md) |
-| 2 | **写提示词** —— 改写 Final Prompt 块 | [`docs/rocom-dimo-generation-prompt.md`](docs/rocom-dimo-generation-prompt.md) |
-| 3 | **生成** —— 1536×1664 PNG，8×8 单元，黑底 | gpt-image / Midjourney / SDXL |
-| 4 | **重排** —— `repack_pet_atlas.py --detect-sprites` | Skill 自动调用 |
-| 5 | **调参** —— `--scale` 与 `--offset-y`，目标 idle bbox 落入 `105-125 × 140-155` 且 `top_min ≥ 35` | `inspect_pet_atlas.py` |
-| 6 | **安装** —— 拷到 `~/.codex/pets/<id>/` | `install_pet.py` |
-
-> ⚠️ **不要照抄上一只宠物的 `--scale`**——轮廓不同决定上限不同（高耳兔 ≤ 1.0；矮胖型可到 1.05+）。新宠物一律从 `0.98` 起步。
+> ⚠️ **设计文档里有一条硬规矩**：不要照抄上一只宠物的 `--scale`——轮廓不同决定上限不同（高耳兔 ≤ 1.0；矮胖型可到 1.05+）。新宠物一律从 `0.98` 起步。
 
 ---
 

@@ -27,11 +27,103 @@ Each pet ships as a 9-row × 8-column atlas covering all Codex states (`idle`, `
 | **Pink Star** (粉星仔) | *Roco World* fan tribute | [`npx petdex install pink-star`](https://petdex.crafter.run/zh/pets/pink-star) | [preview](pets/pink-star/spritesheet-repacked-preview.png) |
 | **Dimo** (迪莫) | *Roco World* fan tribute | _not yet on Petdex — manual only_ | [preview](pets/rocom-dimo/spritesheet-repacked-preview.png) |
 
-## 🚀 Quick start — install a pet
+## 🎯 Core workflow — let the Skill craft a pet for you
 
-### Option A: One-line install via [Petdex](https://petdex.crafter.run/) (fastest)
+> **The Skill drives every step.** You only describe what you want; the Skill takes care of writing the prompt, packaging the source you generate, and installing the result.
 
-Phrolova and Pink Star are published on Petdex; no clone required:
+```mermaid
+sequenceDiagram
+    autonumber
+    actor U as You
+    participant A as Codex / Claude Code agent
+    participant S as open-pet-creator<br/>Skill
+    participant G as gpt-image / Midjourney<br/>/ SDXL
+
+    U->>A: "I want a Codex desktop pet for X"
+    A->>S: agent auto-loads the Skill
+    S-->>U: design doc + Final Prompt for X
+    U->>G: paste prompt into image tool
+    G-->>U: 8×8 source PNG
+    U->>A: "source ready at ~/Downloads/x.png"
+    A->>S: repack → inspect → validate → install
+    S-->>U: ✅ 1536×1872 atlas built<br/>✅ installed to ~/.codex/pets/x/
+```
+
+### Step 1 · Install the Skill into your agent runtime
+
+One copy works for both Codex and Claude Code:
+
+```bash
+# Codex CLI
+cp -R open-pet-creator ~/.codex/skills/open-pet-creator
+
+# Claude Code
+cp -R open-pet-creator ~/.claude/skills/open-pet-creator
+```
+
+> No manual invocation needed afterwards — the agent **auto-loads** the Skill when it sees a relevant request like "I want to make a Codex desktop pet".
+
+### Step 2 · Tell the agent what you want; the Skill writes the prompt
+
+> 👤 **You**: "I want a Codex desktop pet of Pikachu."
+>
+> 🤖 **Claude Code** (auto-loads `open-pet-creator` Skill):
+> Sure. Following the Skill's design template, I'll write a Pikachu-specific design doc and image-generation prompt — per-row pose specs, palette constraints, signature features all included…
+>
+> ✏️ Generated:
+> - `docs/pikachu-pet-design.md` (design doc)
+> - `docs/pikachu-generation-prompt.md` (with a paste-ready **Final Prompt** block)
+>
+> Drop the Final Prompt into your image tool to get a 1536×1664 8×8 grid sheet on a flat black background, then tell me where the source PNG lives.
+
+> 💡 **Why the prompt is good out of the box**: SKILL.md encodes per-row frame counts, why the background must be black (alpha pipeline), and why the layout is 8×8 (Codex contract). The agent applies all of that automatically.
+
+### Step 3 · Run the prompt through any image generator
+
+Paste the **Final Prompt** into:
+
+| Tool | Entry point | Notes |
+| --- | --- | --- |
+| **OpenAI gpt-image-1 / GPT-4o Image** | API or ChatGPT image gen | Best instruction adherence — **first choice** |
+| **Midjourney v6+** | Discord / Web | Strongest character consistency; may need per-row generation |
+| **SDXL + chibi LoRA** | Automatic1111 / ComfyUI | Best for fully local workflows |
+
+> 💡 **Inconsistent output?** The Skill's prompt template includes a fallback recipe for generating one row at a time and stitching.
+
+### Step 4 · Hand the source back to the agent — Skill finishes everything
+
+Save the source as `pets/<pet>/spritesheet-source.png`, then:
+
+> 👤 **You**: "Source is ready at `pets/pikachu/spritesheet-source.png`."
+>
+> 🤖 **Claude Code** (continuing with `open-pet-creator` Skill):
+> Got it. Source is from an image generator, so I'm enabling `--detect-sprites` automatically (handles uneven per-row sprite counts)…
+>
+> ✅ **Repack**: 1536×1872 RGBA WebP, all 9 rows pass the Codex contract
+> ✅ **Validate**: format / mode / grid contract all green
+> ✅ **Inspect**: every row `top_min ≥ 38`, idle bbox `121×155` lands in the recommended range
+>
+> Sync to `~/.codex/pets/pikachu/`?
+
+> 💡 **The Skill also encodes tuning rules**: start from `--scale 0.98`, switch to `--detect-sprites` for generative sources, bump `--offset-y` when `top_min < 35`. You don't have to remember any of this.
+
+### Step 5 · Summon in Codex
+
+```text
+Codex Settings → Appearance → Pets → Custom pets → select your pet → /pet
+```
+
+End-to-end this typically takes **15–30 minutes** (the bottleneck is image-generator iteration). The Skill abstracts away every repetitive part — writing constraint docs, remembering `--detect-sprites`, tuning `--scale` / `--offset-y`, running the contract validator, avoiding known pitfalls.
+
+---
+
+## 🐾 Just want one of the ready-made pets?
+
+Three demo pets ship with the repo:
+
+### Option A · One-line install via [Petdex](https://petdex.crafter.run/) (fastest)
+
+Phrolova and Pink Star are published on Petdex — no clone required:
 
 ```bash
 npx petdex install phrolova
@@ -40,66 +132,17 @@ npx petdex install pink-star
 
 Then in Codex: **Settings → Appearance → Pets → Custom pets**, select the pet, and run `/pet` to summon it.
 
-### Option B: Manual install (for Dimo, or offline / dev workflows)
+### Option B · Manual install (for Dimo, or offline / dev workflows)
 
 ```bash
 git clone https://github.com/EASYGOING45/open-pets.git
 cd open-pets
-
-# Pick one: phrolova / pink-star / rocom-dimo
 mkdir -p ~/.codex/pets/rocom-dimo
 cp pets/rocom-dimo/spritesheet.webp ~/.codex/pets/rocom-dimo/
 cp pets/rocom-dimo/pet.json         ~/.codex/pets/rocom-dimo/
-
-# Then in Codex, reselect the pet (or restart) to refresh the cached thumbnail.
 ```
 
-> Dimo is not yet on Petdex; this README will be updated when it lands.
-
-## 🧰 Install the Skill
-
-The `open-pet-creator` Skill works in both Codex and Claude Code. Install it once into the runtime's skill directory:
-
-```bash
-# For Codex CLI
-cp -R open-pet-creator ~/.codex/skills/open-pet-creator
-
-# For Claude Code
-cp -R open-pet-creator ~/.claude/skills/open-pet-creator
-```
-
-Then invoke it as `$open-pet-creator` (Codex) or `/open-pet-creator` (Claude Code) and ask the agent to repack, inspect, validate, or install pet atlases.
-
-## 🛠️ Make your own pet
-
-The full workflow takes about 30 minutes once you have generated source art:
-
-1. **Design** — copy [`docs/rocom-dimo-pet-design.md`](docs/rocom-dimo-pet-design.md) as a template; describe palette, signature features, per-row poses.
-2. **Prompt** — copy [`docs/rocom-dimo-generation-prompt.md`](docs/rocom-dimo-generation-prompt.md); adjust for your character; paste the **Final Prompt** block into your image generator.
-3. **Generate** — produce a single `1536 × 1664` PNG with an 8-column × 8-row layout on a flat black background. Save as `pets/<your-pet>/spritesheet-source.png`.
-4. **Repack** — let the Skill pack it into the Codex `1536 × 1872` atlas:
-
-   ```bash
-   python3 open-pet-creator/scripts/repack_pet_atlas.py \
-     --source pets/<your-pet>/spritesheet-source.png \
-     --output pets/<your-pet>/spritesheet.webp \
-     --preview pets/<your-pet>/spritesheet-repacked-preview.png \
-     --scale 0.98 --offset-y 14 \
-     --detect-sprites
-   ```
-
-   Use `--detect-sprites` for any source generated by an image model — they rarely produce strictly even grids.
-5. **Inspect & validate**:
-
-   ```bash
-   python3 open-pet-creator/scripts/inspect_pet_atlas.py  pets/<your-pet>/spritesheet.webp
-   python3 open-pet-creator/scripts/validate_pet_atlas.py pets/<your-pet>/spritesheet.webp
-   ```
-
-   Tune `--scale` and `--offset-y` until the idle bbox lands in the recommended `105 – 125 × 140 – 155` range with `top_min ≥ 35`. **Don't copy a value from another pet** — silhouette geometry varies (Phrolova's compact build tolerates 1.07; Pink Star's tall ears need 0.98).
-6. **Install** — copy your `pet.json` and `spritesheet.webp` into `~/.codex/pets/<your-pet>/`.
-
-The Skill's [`SKILL.md`](open-pet-creator/SKILL.md) and [`references/codex-pet-atlas.md`](open-pet-creator/references/codex-pet-atlas.md) document the atlas contract and the scale/offset trade-off in detail.
+> 💡 Dimo is not yet on Petdex; this README will be updated when it lands.
 
 ## 📁 Project structure
 
