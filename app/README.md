@@ -35,10 +35,16 @@ on your screen — independent of Codex CLI.
 
 - ~~External event source — let Codex / Claude Code / Cursor drive pet
   states.~~ ✅ Done — see "Drive the pet from your AI agent" below
-- **`openpets connect <tool>` CLI** — automate the manual hook install for
-  Claude Code / Codex / Cursor (real users will not paste JSON into
-  `~/.claude/settings.json` by hand). Should also offer a `disconnect`
-  command and surface as a checkbox in the picker UI.
+- ~~`openpets connect <tool>` CLI — automate the manual hook install.~~
+  ✅ Done as a tray-menu CheckMenuItem (no JSON pasting needed). Tauri
+  commands `list_tool_connections` / `set_tool_connection` are exposed
+  for future in-picker UI or external CLI.
+- ~~Persist active-pet selection across launches.~~ ✅ Done via
+  `~/.openpets/config.json`.
+- ~~Drag-to-position memory across launches.~~ ✅ Done via the same
+  config file (throttled to ~4 saves/sec while dragging).
+- Codex CLI / Cursor connectors — same pattern, just need their hook
+  formats and settings paths
 - Per-source / per-tool reactions (e.g., Bash failures → `failed`)
 - Click-through on transparent pixels (so the window doesn't intercept
   clicks on its empty edges; needs sprite-bbox hit-testing)
@@ -76,10 +82,39 @@ With `npm run dev` running, in another terminal:
 You should see the pet's animation switch in real time. Each call also
 logs an `[OpenPets] external state event:` line in the dev terminal.
 
-### Connect Claude Code
+### Connect Claude Code (one-click)
 
-The `openpets-event` helper is the small bash script under `app/scripts/`.
-Either add `app/scripts/` to your `PATH`, or copy it once:
+**Tray menu → ☐ Connect to Claude Code** — clicking it does all of this
+in one step:
+
+1. Writes the embedded `openpets-event` helper to `~/.local/bin/` and
+   marks it executable.
+2. Reads `~/.claude/settings.json` (creating it if absent), takes a
+   backup at `settings.json.bak.openpets`, and merges the five hook
+   commands into the appropriate event arrays. The merge is idempotent
+   — clicking the menu item again to disconnect removes exactly the
+   entries OpenPets added, leaving any other hooks you have untouched.
+3. The tray menu's checkmark flips to ✓ to reflect the new state.
+
+Restart Claude Code (or open a new session) and the pet now reacts to
+your conversation:
+
+| Claude Code event | Pet state |
+| --- | --- |
+| Session starts | `idle` (resting) |
+| You submit a prompt | `running` (Claude is working) |
+| Claude needs your attention (permission prompt, idle wait) | `review` |
+| Claude finishes a turn | `waving` → returns to `idle` |
+| Session ends | `idle` |
+
+The same checkbox toggle is also exposed as the Tauri commands
+`list_tool_connections` and `set_tool_connection`, so a future
+in-picker UI / external CLI can drive it without going through the tray.
+
+<details>
+<summary><b>Manual install (if you prefer to handle settings.json yourself)</b></summary>
+
+<br>
 
 ```bash
 cp app/scripts/openpets-event ~/.local/bin/
@@ -112,15 +147,7 @@ you already have):
 }
 ```
 
-Restart Claude Code and the pet now reacts to your session:
-
-| Claude Code event | Pet state |
-| --- | --- |
-| Session starts | `idle` (resting) |
-| You submit a prompt | `running` (Claude is working) |
-| Claude needs your attention (permission prompt, idle wait) | `review` |
-| Claude finishes a turn | `waving` → returns to `idle` |
-| Session ends | `idle` |
+</details>
 
 ### Multiple Claude Code windows
 

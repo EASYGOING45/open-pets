@@ -11,8 +11,8 @@ use std::sync::mpsc;
 use std::sync::Mutex;
 use std::time::Instant;
 use tauri::{
-    menu::{Menu, MenuItem, PredefinedMenuItem},
-    tray::TrayIconBuilder,
+    menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem},
+    tray::{TrayIcon, TrayIconBuilder},
     AppHandle, Builder, Emitter, LogicalPosition, Manager, PhysicalPosition, State,
     WebviewUrl, WebviewWindowBuilder, WindowEvent,
 };
@@ -39,6 +39,8 @@ struct AppState {
     config: Mutex<OpenPetsConfig>,
     // Throttle window-position writes so dragging doesn't pound the disk.
     last_position_write: Mutex<Option<Instant>>,
+    // Stored so the tray menu can be rebuilt after a connect/disconnect.
+    tray_icon: Mutex<Option<TrayIcon>>,
 }
 
 #[derive(Serialize, Clone)]
@@ -107,13 +109,16 @@ fn list_pets() -> Vec<Pet> {
     pets
 }
 
-fn setup_tray(app: &tauri::App, pets: &[Pet]) -> tauri::Result<()> {
-    let menu = Menu::new(app)?;
+fn build_tray_menu<R: tauri::Runtime, M: Manager<R>>(
+    manager: &M,
+    pets: &[Pet],
+) -> tauri::Result<Menu<R>> {
+    let menu = Menu::new(manager)?;
 
     // One menu entry per installed pet — clicking switches the active pet.
     for pet in pets {
         let item = MenuItem::with_id(
-            app,
+            manager,
             format!("pet:{}", pet.id),
             &pet.display_name,
             true,
@@ -123,28 +128,78 @@ fn setup_tray(app: &tauri::App, pets: &[Pet]) -> tauri::Result<()> {
     }
 
     if !pets.is_empty() {
-        menu.append(&PredefinedMenuItem::separator(app)?)?;
+        menu.append(&PredefinedMenuItem::separator(manager)?)?;
     }
 
-    let picker = MenuItem::with_id(app, "picker", "Choose Pet…", true, None::<&str>)?;
+    let picker = MenuItem::with_id(manager, "picker", "Choose Pet…", true, None::<&str>)?;
     menu.append(&picker)?;
 
-    menu.append(&PredefinedMenuItem::separator(app)?)?;
+    menu.append(&PredefinedMenuItem::separator(manager)?)?;
 
-    let quit = MenuItem::with_id(app, "quit", "Quit OpenPets", true, None::<&str>)?;
+    // One CheckMenuItem per supported tool — checked iff our hooks are
+    // currently installed in that tool's settings.
+    for tool in TOOLS {
+        let label = format!("Connect to {}", tool.label);
+        let item = CheckMenuItem::with_id(
+            manager,
+            format!("connect:{}", tool.id),
+            label,
+            true,
+            is_connected_to(tool),
+            None::<&str>,
+        )?;
+        menu.append(&item)?;
+    }
+
+    menu.append(&PredefinedMenuItem::separator(manager)?)?;
+
+    let quit = MenuItem::with_id(manager, "quit", "Quit OpenPets", true, None::<&str>)?;
     menu.append(&quit)?;
+
+    Ok(menu)
+}
+
+fn setup_tray(app: &tauri::App, pets: &[Pet]) -> tauri::Result<()> {
+    let menu = build_tray_menu(app, pets)?;
 
     let icon = app
         .default_window_icon()
         .cloned()
         .ok_or_else(|| tauri::Error::AssetNotFound("default window icon missing".into()))?;
 
-    TrayIconBuilder::new()
+    let tray = TrayIconBuilder::new()
         .menu(&menu)
         .icon(icon)
         .on_menu_event(handle_tray_event)
         .build(app)?;
+
+    if let Some(state) = app.try_state::<AppState>() {
+        if let Ok(mut g) = state.tray_icon.lock() {
+            *g = Some(tray);
+        }
+    }
+
     Ok(())
+}
+
+fn rebuild_tray_menu(app: &AppHandle) {
+    let pets = list_pets();
+    let menu = match build_tray_menu(app, &pets) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("[OpenPets] rebuild_tray_menu failed to build: {e}");
+            return;
+        }
+    };
+    if let Some(state) = app.try_state::<AppState>() {
+        if let Ok(g) = state.tray_icon.lock() {
+            if let Some(tray) = g.as_ref() {
+                if let Err(e) = tray.set_menu(Some(menu)) {
+                    eprintln!("[OpenPets] rebuild_tray_menu set_menu failed: {e}");
+                }
+            }
+        }
+    }
 }
 
 fn handle_tray_event(app: &AppHandle, event: tauri::menu::MenuEvent) {
@@ -157,6 +212,8 @@ fn handle_tray_event(app: &AppHandle, event: tauri::menu::MenuEvent) {
         }
     } else if let Some(pet_id) = id.strip_prefix("pet:") {
         activate_pet(app, pet_id);
+    } else if let Some(tool_id) = id.strip_prefix("connect:") {
+        toggle_tool_connection(app, tool_id);
     }
 }
 
@@ -262,6 +319,285 @@ fn position_is_on_screen(window: &tauri::WebviewWindow, p: &WindowPos) -> bool {
     let logical_h = phys.height as f64 / scale;
     // Require at least a corner of the window to be inside the monitor.
     p.x > -192.0 && p.y > -208.0 && p.x < logical_w - 64.0 && p.y < logical_h - 64.0
+}
+
+// --- Tool connections (Claude Code, Codex, Cursor) -----------------------
+//
+// Connecting a tool to OpenPets means two things:
+//   1. Make sure ~/.local/bin/openpets-event exists and is executable.
+//   2. Idempotently merge our hook commands into the tool's settings file
+//      (e.g. ~/.claude/settings.json).
+//
+// Disconnecting reverses (2) by removing exactly the entries we added,
+// leaving any other hooks the user has configured untouched. We always
+// take a backup at <settings>.bak.openpets before mutating.
+
+const OPENPETS_EVENT_SCRIPT: &str = include_str!("../../scripts/openpets-event");
+
+#[derive(Clone, Copy)]
+struct ToolDef {
+    id: &'static str,
+    label: &'static str,
+    /// Returns the absolute path of the tool's settings.json (or None on
+    /// platforms where we can't determine it, e.g. missing $HOME).
+    settings_path_fn: fn() -> Option<PathBuf>,
+    /// (Claude Code event name, command line) pairs to inject as hooks.
+    hooks: &'static [(&'static str, &'static str)],
+}
+
+const CLAUDE_CODE_HOOKS: &[(&str, &str)] = &[
+    ("SessionStart", "openpets-event idle    claude-code"),
+    ("UserPromptSubmit", "openpets-event running claude-code"),
+    ("Notification", "openpets-event review  claude-code"),
+    ("Stop", "openpets-event waving  claude-code"),
+    ("SessionEnd", "openpets-event idle    claude-code"),
+];
+
+fn claude_code_settings_path() -> Option<PathBuf> {
+    std::env::var("HOME")
+        .ok()
+        .map(|h| PathBuf::from(h).join(".claude").join("settings.json"))
+}
+
+const TOOLS: &[ToolDef] = &[ToolDef {
+    id: "claude-code",
+    label: "Claude Code",
+    settings_path_fn: claude_code_settings_path,
+    hooks: CLAUDE_CODE_HOOKS,
+}];
+
+fn ensure_helper_installed() -> Result<PathBuf, String> {
+    let home = std::env::var("HOME").map_err(|e| e.to_string())?;
+    let bin_dir = PathBuf::from(&home).join(".local").join("bin");
+    fs::create_dir_all(&bin_dir).map_err(|e| e.to_string())?;
+    let target = bin_dir.join("openpets-event");
+    fs::write(&target, OPENPETS_EVENT_SCRIPT).map_err(|e| e.to_string())?;
+
+    use std::os::unix::fs::PermissionsExt;
+    let mut perms = fs::metadata(&target)
+        .map_err(|e| e.to_string())?
+        .permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&target, perms).map_err(|e| e.to_string())?;
+    Ok(target)
+}
+
+fn is_connected_to(tool: &ToolDef) -> bool {
+    let Some(path) = (tool.settings_path_fn)() else {
+        return false;
+    };
+    let Ok(text) = fs::read_to_string(&path) else {
+        return false;
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return false;
+    };
+    let Some(hooks) = value.get("hooks") else {
+        return false;
+    };
+
+    tool.hooks.iter().any(|(event, cmd)| {
+        let Some(events) = hooks.get(event).and_then(|v| v.as_array()) else {
+            return false;
+        };
+        events.iter().any(|block| {
+            block
+                .get("hooks")
+                .and_then(|h| h.as_array())
+                .is_some_and(|inner| {
+                    inner.iter().any(|h| {
+                        h.get("command").and_then(|c| c.as_str()) == Some(*cmd)
+                    })
+                })
+        })
+    })
+}
+
+fn connect_tool(tool: &ToolDef) -> Result<(), String> {
+    ensure_helper_installed()?;
+
+    let Some(path) = (tool.settings_path_fn)() else {
+        return Err(format!("unknown tool: {}", tool.id));
+    };
+
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+
+    let mut value = if path.exists() {
+        // Backup the original before mutating (overwrites any prior backup).
+        let backup = path.with_extension("json.bak.openpets");
+        let _ = fs::copy(&path, &backup);
+
+        let text = fs::read_to_string(&path).map_err(|e| e.to_string())?;
+        if text.trim().is_empty() {
+            serde_json::json!({})
+        } else {
+            serde_json::from_str::<serde_json::Value>(&text).map_err(|e| e.to_string())?
+        }
+    } else {
+        serde_json::json!({})
+    };
+
+    {
+        let obj = value
+            .as_object_mut()
+            .ok_or_else(|| "settings.json root is not an object".to_string())?;
+        let hooks_entry = obj.entry("hooks").or_insert_with(|| serde_json::json!({}));
+        let hooks_obj = hooks_entry
+            .as_object_mut()
+            .ok_or_else(|| "settings.json `hooks` is not an object".to_string())?;
+
+        for (event, cmd) in tool.hooks {
+            let event_arr = hooks_obj
+                .entry((*event).to_string())
+                .or_insert_with(|| serde_json::json!([]));
+            let arr = event_arr.as_array_mut().ok_or_else(|| {
+                format!("settings.json hooks.{event} is not an array")
+            })?;
+
+            let already = arr.iter().any(|block| {
+                block
+                    .get("hooks")
+                    .and_then(|h| h.as_array())
+                    .is_some_and(|inner| {
+                        inner.iter().any(|h| {
+                            h.get("command").and_then(|c| c.as_str()) == Some(*cmd)
+                        })
+                    })
+            });
+            if already {
+                continue;
+            }
+
+            arr.push(serde_json::json!({
+                "hooks": [{ "type": "command", "command": *cmd }]
+            }));
+        }
+    }
+
+    let pretty = serde_json::to_string_pretty(&value).map_err(|e| e.to_string())?;
+    let tmp = path.with_extension("json.tmp.openpets");
+    fs::write(&tmp, &pretty).map_err(|e| e.to_string())?;
+    fs::rename(&tmp, &path).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+fn disconnect_tool(tool: &ToolDef) -> Result<(), String> {
+    let Some(path) = (tool.settings_path_fn)() else {
+        return Err(format!("unknown tool: {}", tool.id));
+    };
+    if !path.exists() {
+        return Ok(());
+    }
+
+    let backup = path.with_extension("json.bak.openpets");
+    let _ = fs::copy(&path, &backup);
+
+    let text = fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    let mut value =
+        serde_json::from_str::<serde_json::Value>(&text).map_err(|e| e.to_string())?;
+
+    {
+        let Some(hooks_obj) = value
+            .as_object_mut()
+            .and_then(|o| o.get_mut("hooks"))
+            .and_then(|h| h.as_object_mut())
+        else {
+            return Ok(());
+        };
+
+        for (event, cmd) in tool.hooks {
+            if let Some(arr) = hooks_obj.get_mut(*event).and_then(|v| v.as_array_mut()) {
+                arr.retain(|block| {
+                    let inner = block.get("hooks").and_then(|h| h.as_array());
+                    let has_our = inner.is_some_and(|inner_arr| {
+                        inner_arr.iter().any(|h| {
+                            h.get("command").and_then(|c| c.as_str()) == Some(*cmd)
+                        })
+                    });
+                    !has_our
+                });
+            }
+        }
+        // Drop event entries we emptied.
+        hooks_obj.retain(|_, v| !v.as_array().is_some_and(|a| a.is_empty()));
+    }
+
+    // If hooks ended up empty, drop the key entirely.
+    if let Some(obj) = value.as_object_mut() {
+        let hooks_empty = obj
+            .get("hooks")
+            .and_then(|h| h.as_object())
+            .is_some_and(|o| o.is_empty());
+        if hooks_empty {
+            obj.remove("hooks");
+        }
+    }
+
+    let pretty = serde_json::to_string_pretty(&value).map_err(|e| e.to_string())?;
+    let tmp = path.with_extension("json.tmp.openpets");
+    fs::write(&tmp, &pretty).map_err(|e| e.to_string())?;
+    fs::rename(&tmp, &path).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+fn toggle_tool_connection(app: &AppHandle, tool_id: &str) {
+    let Some(tool) = TOOLS.iter().find(|t| t.id == tool_id) else {
+        eprintln!("[OpenPets] unknown tool: {tool_id}");
+        return;
+    };
+    let was_connected = is_connected_to(tool);
+    let result = if was_connected {
+        disconnect_tool(tool)
+    } else {
+        connect_tool(tool)
+    };
+
+    match result {
+        Ok(()) => {
+            let action = if was_connected {
+                "disconnected from"
+            } else {
+                "connected to"
+            };
+            eprintln!("[OpenPets] {action} {}", tool.label);
+            rebuild_tray_menu(app);
+        }
+        Err(e) => {
+            eprintln!(
+                "[OpenPets] toggle_tool_connection({}): {e}",
+                tool.id
+            );
+        }
+    }
+}
+
+#[tauri::command]
+fn list_tool_connections() -> Vec<(String, String, bool)> {
+    TOOLS
+        .iter()
+        .map(|t| (t.id.to_string(), t.label.to_string(), is_connected_to(t)))
+        .collect()
+}
+
+#[tauri::command]
+fn set_tool_connection(app: AppHandle, id: String, connected: bool) -> Result<(), String> {
+    let tool = TOOLS
+        .iter()
+        .find(|t| t.id == id)
+        .ok_or_else(|| format!("unknown tool: {id}"))?;
+    let currently = is_connected_to(tool);
+    if connected == currently {
+        return Ok(());
+    }
+    if connected {
+        connect_tool(tool)?;
+    } else {
+        disconnect_tool(tool)?;
+    }
+    rebuild_tray_menu(&app);
+    Ok(())
 }
 
 fn show_picker_window(app: &AppHandle) -> tauri::Result<()> {
@@ -582,6 +918,8 @@ fn main() {
             get_active_pet,
             set_active_pet,
             start_drag,
+            list_tool_connections,
+            set_tool_connection,
         ])
         .run(tauri::generate_context!())
         .expect("failed to run OpenPets");
