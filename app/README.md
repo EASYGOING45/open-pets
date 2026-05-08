@@ -35,6 +35,10 @@ on your screen — independent of Codex CLI.
 
 - ~~External event source — let Codex / Claude Code / Cursor drive pet
   states.~~ ✅ Done — see "Drive the pet from your AI agent" below
+- **`openpets connect <tool>` CLI** — automate the manual hook install for
+  Claude Code / Codex / Cursor (real users will not paste JSON into
+  `~/.claude/settings.json` by hand). Should also offer a `disconnect`
+  command and surface as a checkbox in the picker UI.
 - Per-source / per-tool reactions (e.g., Bash failures → `failed`)
 - Click-through on transparent pixels (so the window doesn't intercept
   clicks on its empty edges; needs sprite-bbox hit-testing)

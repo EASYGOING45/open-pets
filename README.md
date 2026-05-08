@@ -68,8 +68,8 @@
 <td><a href="open-pet-creator/"><code>open-pet-creator/</code></a></td>
 </tr>
 <tr>
-<td>🖥️ <b>OpenPets 桌面应用</b>（Phase 1）</td>
-<td>Tauri 2 写的轻量级桌面渲染器（~5MB），直接读 <code>~/.codex/pets/</code>，让宠物脱离 Codex 也能在桌面动起来。<b>跨全屏 Space 可见</b>、可拖动、点击触发动画；托盘菜单 + 磨砂玻璃 picker 面板支持多宠物切换。macOS 优先，Linux/Windows 在路上</td>
+<td>🖥️ <b>OpenPets 桌面应用</b></td>
+<td>Tauri 2 写的轻量级桌面渲染器（~5MB），直接读 <code>~/.codex/pets/</code>，让宠物脱离 Codex 也能在桌面动起来。<b>跨全屏 Space 可见</b>、可拖动、点击触发动画；托盘菜单 + 磨砂玻璃 picker 支持多宠物切换。<b>🤖 与 Claude Code 联动</b>：通过 hook 让宠物随 AI 对话状态自然切换（提问 → running，AI 回完 → waving）。macOS 优先，Linux/Windows 在路上</td>
 <td><a href="app/"><code>app/</code></a></td>
 </tr>
 <tr>
@@ -211,6 +211,37 @@ cp pets/rocom-dimo/pet.json         ~/.codex/pets/rocom-dimo/
 
 ---
 
+## 🖥️ 桌面应用 — 让宠物跟着你的 AI 工作流
+
+`app/` 下是一个 ~5MB 的 Tauri 2 桌面应用，**直接读 `~/.codex/pets/` 同样的格式**，把 Codex 宠物原子图渲染成永远在最上层的桌面伴侣——脱离 Codex CLI 也能跑。
+
+```bash
+cd app
+npm install && npm run dev
+```
+
+第一次构建 30-60s。启动后宠物会出现在屏幕右下角，**跨全屏 Space 可见**，可拖动，点击触发挥手；右上角托盘菜单点 *Choose Pet…* 调出磨砂玻璃 picker 切换宠物。
+
+### 🤖 与 Claude Code 实时联动
+
+桌面应用监听 `~/.openpets/state.json`——任何能跑 shell 命令的工具都能驱动宠物动画。Claude Code 通过 5 个 hook 接管宠物状态：
+
+| Claude Code 事件 | 触发时机 | 宠物状态 |
+| --- | --- | --- |
+| `SessionStart` | 新会话启动 | `idle`（站立） |
+| `UserPromptSubmit` | 你按下回车提问 | `running`（跑动） |
+| `Notification` | Claude 申请权限 / 等你决策 | `review`（侧脸思考） |
+| `Stop` | Claude 一个 turn 回完 | `waving`（挥手 → 自动回 idle） |
+| `SessionEnd` | 会话结束 | `idle` |
+
+随便提一句话 → 宠物开始跑动 → 我回完 → 它挥手致意 → 安静下来。
+
+完整安装步骤、Codex / Cursor 接入说明、`openpets-event` helper 的用法见 [`app/README.md`](app/README.md)。
+
+> 💡 **未来**：用户不应手动编 `~/.claude/settings.json`。Phase 2.B 计划提供 `openpets connect <tool>` CLI 一键完成 hook 注入。
+
+---
+
 ## 🤖 关于 open-pet-creator Skill
 
 <details>
@@ -258,11 +289,12 @@ open-pets/
 │   ├── references/codex-pet-atlas.md     Codex 原子图契约文档
 │   └── scripts/                          repack / inspect / validate / install
 │
-├── 🖥️ app/                          ← 桌面应用（Phase 1，Tauri 2，macOS 优先）
+├── 🖥️ app/                          ← 桌面应用（Tauri 2，macOS 优先）
 │   ├── index.html / main.js / style.css   主宠物窗口（vanilla 前端）
 │   ├── picker.html / picker.js / picker.css  多宠物切换面板
+│   ├── scripts/openpets-event             Claude Code / Codex 等 hook 用的写入器
 │   ├── package.json                      只有 @tauri-apps/cli 一个 devDep
-│   └── src-tauri/                        Rust 核：窗口 / 托盘 / NSPanel hack
+│   └── src-tauri/                        Rust 核：窗口 / 托盘 / NSPanel / 文件 watcher
 │
 ├── 🐾 pets/                         ← 已收录宠物
 │   ├── phrolova/  (鸣潮)
