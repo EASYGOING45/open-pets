@@ -102,6 +102,16 @@ async function init() {
     if (event.payload) loadPet(event.payload);
   });
 
+  // External event source: hooks from Claude Code / Codex / Cursor write a
+  // state name to ~/.openpets/state.json; the Rust watcher relays it as a
+  // `pet-state-changed` event with the state name as the payload.
+  await listen("pet-state-changed", (event) => {
+    if (typeof event.payload === "string") {
+      console.log(`OpenPets: external → ${event.payload}`);
+      setState(event.payload);
+    }
+  });
+
   const pets = await invoke("list_pets");
   if (pets.length === 0) {
     console.warn(

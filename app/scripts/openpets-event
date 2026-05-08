@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+# openpets-event — emit a pet state change to the OpenPets desktop app.
+#
+# Usage: openpets-event <state> [source]
+#
+# Valid states: idle, running, running-right, running-left, waving,
+#               jumping, failed, waiting, review
+#
+# `source` defaults to "cli" and is just a tag for diagnostics; e.g.
+#   openpets-event running   claude-code
+#   openpets-event waving    codex-cli
+#   openpets-event review    cursor
+#
+# This script writes JSON to ~/.openpets/state.json atomically (write to a
+# temp file, then mv), so the OpenPets file watcher never sees a partial
+# document.
+
+set -euo pipefail
+
+state="${1:-}"
+source_label="${2:-cli}"
+
+if [[ -z "$state" ]]; then
+  cat >&2 <<'EOF'
+usage: openpets-event <state> [source]
+
+valid states:
+  idle, running, running-right, running-left, waving,
+  jumping, failed, waiting, review
+EOF
+  exit 1
+fi
+
+dir="${HOME}/.openpets"
+mkdir -p "$dir"
+
+tmp="${dir}/.state.tmp.$$"
+trap 'rm -f "$tmp"' EXIT
+
+printf '{"state":"%s","timestamp":%d,"source":"%s"}\n' \
+  "$state" \
+  "$(date +%s)" \
+  "$source_label" \
+  > "$tmp"
+
+mv -f "$tmp" "${dir}/state.json"

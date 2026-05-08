@@ -3,9 +3,11 @@
 // objc 0.2 macros emit deprecated cfg lints on modern rustc; harmless.
 #![allow(unexpected_cfgs)]
 
+use notify::{Config, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use serde::Serialize;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::mpsc;
 use std::sync::Mutex;
 use tauri::{
     menu::{Menu, MenuItem, PredefinedMenuItem},
@@ -271,6 +273,118 @@ fn start_drag(window: tauri::WebviewWindow) -> Result<(), String> {
     window.start_dragging().map_err(|e| e.to_string())
 }
 
+// External event source: any tool that wants to drive the pet's state writes
+// JSON to ~/.openpets/state.json with shape:
+//   {"state": "<one of the 9 Codex states>", "timestamp": 1700000000, "source": "claude-code"}
+//
+// We watch the directory (not the file directly), because hooks typically use
+// `mv tmp state.json` for atomic writes — that breaks per-file FSEvents on
+// macOS. Filtering events to the target path is fine.
+const STATE_FILE_NAME: &str = "state.json";
+
+fn state_dir() -> Option<PathBuf> {
+    std::env::var("HOME")
+        .ok()
+        .map(|h| PathBuf::from(h).join(".openpets"))
+}
+
+fn ensure_state_dir() -> Option<PathBuf> {
+    let dir = state_dir()?;
+    if let Err(e) = fs::create_dir_all(&dir) {
+        eprintln!("[OpenPets] mkdir {} failed: {e}", dir.display());
+        return None;
+    }
+    let path = dir.join(STATE_FILE_NAME);
+    if !path.exists() {
+        let initial = r#"{"state":"idle","timestamp":0,"source":"openpets"}"#;
+        if let Err(e) = fs::write(&path, initial) {
+            eprintln!("[OpenPets] write initial state failed: {e}");
+        }
+    }
+    Some(dir)
+}
+
+fn is_valid_state(name: &str) -> bool {
+    matches!(
+        name,
+        "idle"
+            | "running-right"
+            | "running-left"
+            | "waving"
+            | "jumping"
+            | "failed"
+            | "waiting"
+            | "running"
+            | "review"
+    )
+}
+
+fn handle_state_file_event(app: &AppHandle, path: &Path) {
+    let Ok(text) = fs::read_to_string(path) else {
+        return; // mid-write race; next event will catch up
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return; // partial JSON during write
+    };
+    let Some(state_name) = value.get("state").and_then(|v| v.as_str()) else {
+        return;
+    };
+    if !is_valid_state(state_name) {
+        eprintln!(
+            "[OpenPets] state.json: ignoring unknown state '{state_name}'"
+        );
+        return;
+    }
+    let source = value
+        .get("source")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
+    eprintln!("[OpenPets] external state event: {state_name} (source={source})");
+    if let Err(e) = app.emit("pet-state-changed", state_name) {
+        eprintln!("[OpenPets] emit pet-state-changed failed: {e}");
+    }
+}
+
+fn watch_state_file(app: AppHandle) {
+    let Some(dir) = ensure_state_dir() else {
+        return;
+    };
+    let target = dir.join(STATE_FILE_NAME);
+
+    std::thread::spawn(move || {
+        let (tx, rx) = mpsc::channel();
+        let mut watcher = match RecommendedWatcher::new(tx, Config::default()) {
+            Ok(w) => w,
+            Err(e) => {
+                eprintln!("[OpenPets] failed to create file watcher: {e}");
+                return;
+            }
+        };
+
+        if let Err(e) = watcher.watch(&dir, RecursiveMode::NonRecursive) {
+            eprintln!("[OpenPets] failed to watch {}: {e}", dir.display());
+            return;
+        }
+        eprintln!("[OpenPets] watching {}", target.display());
+
+        for received in rx {
+            match received {
+                Ok(ev) => {
+                    let touched = ev.paths.iter().any(|p| p == &target);
+                    let interesting = matches!(
+                        ev.kind,
+                        EventKind::Modify(_) | EventKind::Create(_)
+                    );
+                    if touched && interesting {
+                        handle_state_file_event(&app, &target);
+                    }
+                }
+                Err(e) => eprintln!("[OpenPets] watcher error: {e}"),
+            }
+        }
+    });
+}
+
 #[tauri::command]
 fn get_active_pet(state: State<AppState>) -> Option<Pet> {
     let id = state.active_pet_id.lock().ok()?.clone()?;
@@ -326,6 +440,10 @@ fn main() {
                     let _ = window.set_position(LogicalPosition::new(x, y));
                 }
             }
+
+            // Start the external-event watcher so Claude Code / Codex / Cursor
+            // hooks can drive the pet's animation state via ~/.openpets/state.json.
+            watch_state_file(app.handle().clone());
 
             Ok(())
         })

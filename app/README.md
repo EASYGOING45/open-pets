@@ -25,13 +25,17 @@ on your screen — independent of Codex CLI.
   pet) or a visual picker panel: tray menu → *Choose Pet…* opens a
   frosted-glass 400×240 grid of thumbnails, click one to switch. Esc
   or clicking elsewhere dismisses the picker.
+- **External event source** — a file watcher on `~/.openpets/state.json`
+  lets Claude Code / Codex / Cursor / any shell-driveable tool drive the
+  pet's animation in real time (see "Drive the pet from your AI agent"
+  below)
 - Tray icon menu → `Quit`
 
 ## Roadmap (Phase 2)
 
-- External event source — let Codex / Claude Code / Cursor drive pet states
-  via a local socket or file watcher (e.g., AI is generating → `running`,
-  test failed → `failed`, task done → `waving`)
+- ~~External event source — let Codex / Claude Code / Cursor drive pet
+  states.~~ ✅ Done — see "Drive the pet from your AI agent" below
+- Per-source / per-tool reactions (e.g., Bash failures → `failed`)
 - Click-through on transparent pixels (so the window doesn't intercept
   clicks on its empty edges; needs sprite-bbox hit-testing)
 - Multi-pet support (multiple pets visible simultaneously), drag-to-position
@@ -39,6 +43,95 @@ on your screen — independent of Codex CLI.
 - Persist active-pet selection across launches (currently always defaults
   to the first pet alphabetically on cold start)
 - Cross-platform parity (Linux / Windows)
+
+## Drive the pet from your AI agent
+
+OpenPets watches `~/.openpets/state.json`. Anything that writes a JSON
+document like
+
+```json
+{ "state": "running", "timestamp": 1715000000, "source": "claude-code" }
+```
+
+into that file will instantly drive the pet's animation. Valid `state`
+values are the nine canonical Codex states: `idle`, `running-right`,
+`running-left`, `waving`, `jumping`, `failed`, `waiting`, `running`,
+`review`. Anything else is ignored with a log line.
+
+### Quick test
+
+With `npm run dev` running, in another terminal:
+
+```bash
+./scripts/openpets-event running
+./scripts/openpets-event review
+./scripts/openpets-event waving      # one-shot, returns to idle automatically
+./scripts/openpets-event idle
+```
+
+You should see the pet's animation switch in real time. Each call also
+logs an `[OpenPets] external state event:` line in the dev terminal.
+
+### Connect Claude Code
+
+The `openpets-event` helper is the small bash script under `app/scripts/`.
+Either add `app/scripts/` to your `PATH`, or copy it once:
+
+```bash
+cp app/scripts/openpets-event ~/.local/bin/
+chmod +x ~/.local/bin/openpets-event
+# make sure ~/.local/bin is on your PATH
+```
+
+Then add this block to `~/.claude/settings.json` (merge with any hooks
+you already have):
+
+```json
+{
+  "hooks": {
+    "SessionStart": [{
+      "hooks": [{ "type": "command", "command": "openpets-event idle claude-code" }]
+    }],
+    "UserPromptSubmit": [{
+      "hooks": [{ "type": "command", "command": "openpets-event running claude-code" }]
+    }],
+    "Notification": [{
+      "hooks": [{ "type": "command", "command": "openpets-event review claude-code" }]
+    }],
+    "Stop": [{
+      "hooks": [{ "type": "command", "command": "openpets-event waving claude-code" }]
+    }],
+    "SessionEnd": [{
+      "hooks": [{ "type": "command", "command": "openpets-event idle claude-code" }]
+    }]
+  }
+}
+```
+
+Restart Claude Code and the pet now reacts to your session:
+
+| Claude Code event | Pet state |
+| --- | --- |
+| Session starts | `idle` (resting) |
+| You submit a prompt | `running` (Claude is working) |
+| Claude needs your attention (permission prompt, idle wait) | `review` |
+| Claude finishes a turn | `waving` → returns to `idle` |
+| Session ends | `idle` |
+
+### Multiple Claude Code windows
+
+Hooks from every concurrent Claude Code session write to the same file,
+so the pet shows whichever event happened most recently. This is
+intentional for the MVP — it matches the "what just happened" intuition
+of a desktop pet. A per-session aggregation mode (e.g., "any session
+running → running") can be added later if needed.
+
+### Connect other tools
+
+Codex CLI, Cursor, custom scripts, CI runners — anything that can run a
+shell command can drive the pet. Just call `openpets-event <state>
+<source-label>` from wherever you want a state transition. The
+`source-label` is a free-form string used only for diagnostics.
 
 ## Prerequisites
 
@@ -90,12 +183,15 @@ Bundle size is typically **~5 MB** thanks to using the system WebKit
 app/
 ├── index.html            Main pet window entry (vanilla, no framework)
 ├── main.js               State machine + sprite animation; subscribes to
-│                         `pet-changed` events to swap atlas on demand
+│                         `pet-changed` (which pet) and `pet-state-changed`
+│                         (which animation row) events
 ├── style.css             Transparent body, grab cursor on the pet
 ├── picker.html           Pet picker dialog entry
 ├── picker.js             Builds the thumbnail grid; calls `set_active_pet`
 ├── picker.css            Frosted-glass dialog look
 ├── package.json          Tauri CLI as the only Node dep
+├── scripts/
+│   └── openpets-event    Bash helper for atomic ~/.openpets/state.json writes
 └── src-tauri/
     ├── Cargo.toml        Minimal Rust deps (tauri + serde + objc on macOS)
     ├── tauri.conf.json   Main window config (transparent, always-on-top, …)
@@ -107,7 +203,8 @@ app/
     └── src/
         └── main.rs       Pet scan + dynamic tray menu + NSPanel hack +
                           start_drag / list_pets / get_active_pet /
-                          set_active_pet commands + picker window factory
+                          set_active_pet commands + picker window factory +
+                          ~/.openpets/state.json watcher
 ```
 
 ## How it stays lightweight
