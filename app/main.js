@@ -23,19 +23,139 @@ const STATES = {
   review: { row: 8, frames: 6, fps: 4 },
 };
 
+// States where the user is being asked to do something (tool confirmation,
+// permission prompt, etc). Entering these from a non-attention state plays a
+// summon animation + window shake + optional sound.
+const ATTENTION_STATES = new Set(["review", "waiting"]);
+const RESUMMON_DELAY_MS = 30_000;
+
+// Friendly label shown in the bubble for each state. `null` = no bubble.
+// jumping is a transitional intro animation, not a state worth narrating.
+const STATE_LABELS = {
+  idle: null,
+  running: "Running…",
+  "running-right": "Running…",
+  "running-left": "Running…",
+  waving: "Hi!",
+  jumping: null,
+  failed: "Oops",
+  waiting: "Waiting for you",
+  review: "Review needed",
+};
+// Bubbles that stay visible until the state changes (vs. fading after 2s).
+const PERSISTENT_BUBBLE = ATTENTION_STATES;
+// Bubbles painted in the attention color + pulse animation.
+const ATTENTION_BUBBLE = ATTENTION_STATES;
+const BUBBLE_HOLD_MS = 2200;
+
 const canvas = document.getElementById("pet");
 const ctx = canvas.getContext("2d");
+const bubbleEl = document.getElementById("bubble");
 let img = new Image();
 
 let state = "idle";
 let frame = 0;
 let lastFrameTime = 0;
 
+// When the jumping pre-roll finishes, the tick loop transitions to this
+// target instead of jumping's default `then: "idle"`. Used for the summon.
+let pendingAfterIntro = null;
+let resummonTimer = null;
+let bubbleHideTimer = null;
+let attentionSoundEnabled = false;
+
+function updateBubble(name) {
+  const text = STATE_LABELS[name];
+  if (bubbleHideTimer) {
+    clearTimeout(bubbleHideTimer);
+    bubbleHideTimer = null;
+  }
+  if (!text) {
+    bubbleEl.classList.remove("visible", "attention");
+    return;
+  }
+  bubbleEl.textContent = text;
+  bubbleEl.classList.toggle("attention", ATTENTION_BUBBLE.has(name));
+  bubbleEl.classList.add("visible");
+  if (!PERSISTENT_BUBBLE.has(name)) {
+    bubbleHideTimer = setTimeout(() => {
+      bubbleEl.classList.remove("visible", "attention");
+      bubbleHideTimer = null;
+    }, BUBBLE_HOLD_MS);
+  }
+}
+
 function setState(name) {
   if (!STATES[name]) return;
   state = name;
   frame = 0;
   lastFrameTime = performance.now();
+  updateBubble(name);
+
+  // Any state change cancels a pending re-summon — the user has progressed.
+  if (resummonTimer) {
+    clearTimeout(resummonTimer);
+    resummonTimer = null;
+  }
+
+  // While the user lingers in an attention state, give one quiet nudge after
+  // RESUMMON_DELAY_MS in case they didn't notice the first summon.
+  if (ATTENTION_STATES.has(name)) {
+    resummonTimer = setTimeout(() => {
+      resummonTimer = null;
+      if (state === name) summonAttention(name, { silent: true });
+    }, RESUMMON_DELAY_MS);
+  }
+}
+
+function summonAttention(targetState, { silent = false } = {}) {
+  pendingAfterIntro = targetState;
+  setState("jumping");
+  // Show the target state's bubble immediately (overriding jumping's null
+  // label) so the user sees both the wiggle and the explanation at once.
+  updateBubble(targetState);
+  invoke("shake_window").catch((e) => console.warn("shake_window failed:", e));
+  if (!silent && attentionSoundEnabled) playAttentionBeep();
+}
+
+// Called for every external state transition (Claude Code hook → state.json
+// → Rust → here). Plays the summon if we're entering an attention state from
+// a non-attention state; otherwise just sets the state directly.
+function transitionToExternal(name) {
+  if (!STATES[name]) return;
+  const enteringAttention = ATTENTION_STATES.has(name);
+  const alreadyInAttention = ATTENTION_STATES.has(state);
+  if (enteringAttention && !alreadyInAttention) {
+    summonAttention(name);
+  } else {
+    setState(name);
+  }
+}
+
+// Brief Web Audio bleep — no asset to ship, just two short tones with a
+// quick decay. Opt-in: only plays when the user enabled "Attention Sound"
+// in the tray menu.
+function playAttentionBeep() {
+  try {
+    const Ctor = window.AudioContext || window.webkitAudioContext;
+    if (!Ctor) return;
+    const ac = new Ctor();
+    const osc = ac.createOscillator();
+    const gain = ac.createGain();
+    osc.connect(gain);
+    gain.connect(ac.destination);
+    osc.type = "sine";
+    osc.frequency.setValueAtTime(900, ac.currentTime);
+    osc.frequency.exponentialRampToValueAtTime(700, ac.currentTime + 0.18);
+    gain.gain.setValueAtTime(0.0001, ac.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.18, ac.currentTime + 0.02);
+    gain.gain.exponentialRampToValueAtTime(0.0001, ac.currentTime + 0.4);
+    osc.start();
+    osc.stop(ac.currentTime + 0.42);
+    setTimeout(() => ac.close().catch(() => {}), 600);
+  } catch (e) {
+    console.warn("attention beep failed:", e);
+  }
 }
 
 function draw() {
@@ -62,7 +182,15 @@ function tick(now) {
     frame++;
     if (frame >= s.frames) {
       if (s.oneshot) {
-        setState(s.then);
+        // If a summon queued an attention state behind this oneshot, jump to
+        // it instead of the default fallback.
+        if (pendingAfterIntro) {
+          const next = pendingAfterIntro;
+          pendingAfterIntro = null;
+          setState(next);
+        } else {
+          setState(s.then);
+        }
         requestAnimationFrame(tick);
         return;
       }
@@ -108,9 +236,15 @@ async function init() {
   await listen("pet-state-changed", (event) => {
     if (typeof event.payload === "string") {
       console.log(`OpenPets: external → ${event.payload}`);
-      setState(event.payload);
+      transitionToExternal(event.payload);
     }
   });
+
+  await listen("attention-sound-changed", (event) => {
+    attentionSoundEnabled = !!event.payload;
+  });
+
+  attentionSoundEnabled = await invoke("get_attention_sound").catch(() => false);
 
   const pets = await invoke("list_pets");
   if (pets.length === 0) {
@@ -138,5 +272,17 @@ canvas.addEventListener("mousedown", (e) => {
 });
 
 canvas.addEventListener("click", () => setState("waving"));
+
+// Right-click anywhere in the window pops the same menu as the tray icon.
+// The macOS menu bar frequently hides the tray icon when the bar is full,
+// so this is the always-available path for switching pets, connecting
+// Claude Code, toggling sound, and quitting. We listen on the document so
+// the transparent corners around the pet are also valid right-click zones.
+document.addEventListener("contextmenu", (e) => {
+  e.preventDefault();
+  invoke("show_context_menu").catch((err) =>
+    console.error("show_context_menu failed:", err),
+  );
+});
 
 init();

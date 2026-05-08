@@ -5,8 +5,11 @@ the project is, what's open, and what we'd want to remember next time we
 sit down to keep building. Pair with `CLAUDE.md` (orientation) and the
 auto-memory feedback files (lessons).
 
-> **Last updated**: 2026-05-08 — Phase 2.B completed (one-click Claude Code
-> connect, active-pet persistence, window-position persistence).
+> **Last updated**: 2026-05-08 — Phase 2.C UX polish landed: attention
+> summon (jump + window shake + opt-in sound) for review/waiting,
+> right-click pet → tray menu, status bubbles with friendly labels,
+> smarter `openpets-event auto` mode that promotes failed PostToolUse
+> calls to the `failed` animation.
 
 ---
 
@@ -21,27 +24,31 @@ auto-memory feedback files (lessons).
 | Pet picker (1.5) | Tray menu lists every installed pet; "Choose Pet…" opens a 400×240 frosted-glass thumbnail grid | `app/picker.{html,js,css}` |
 | Phase 2.A — IDE event source | `~/.openpets/state.json` watcher on the Rust side; `openpets-event` bash helper for atomic writes; Claude Code hooks tested end-to-end | `app/scripts/openpets-event`, `watch_state_file` in `main.rs` |
 | Phase 2.B — automation | One-click "Connect to Claude Code" tray toggle (no JSON pasting); active-pet and window-position persistence in `~/.openpets/config.json` | `connect_tool` / `disconnect_tool` / `OpenPetsConfig` in `main.rs` |
+| Phase 2.C — UX polish | Attention-summon for review/waiting (jumping pre-roll + window shake + opt-in sound, silent re-summon at 30s); right-click pet → same menu as the tray icon; status bubbles with friendly labels (red pulse on attention states); smarter `openpets-event auto` mode parses Claude Code hook JSON so failed `PostToolUse` calls flip the pet to `failed`; auto-reinstall hooks on startup so already-connected users pick up new ones | `app/main.{js,css}`, `shake_window` / `show_context_menu` in `main.rs`, `app/scripts/openpets-event` |
 
 ---
 
 ## ⏳ Next (priority order)
 
-1. **Codex CLI connector** — should be ~1 ToolDef entry plus its hook
-   shape. Tauri code already supports an arbitrary number of `TOOLS`.
-2. **Cursor connector** — same pattern; figure out Cursor's hook surface.
-3. **Picker "Settings" sub-area** — surface the connect-toggles inside
-   the existing magic-glass picker so the user doesn't have to hunt the
-   tray menu. Tauri commands `list_tool_connections` /
-   `set_tool_connection` already exist for this.
-4. **Per-tool failure reactions** — `PostToolUse` hook can inspect the
-   tool result; map non-zero exits / errors → `failed` state. Needs a
-   smarter helper than the current bash one (probably embed a tiny
-   parser in the script).
-5. **Linux / Windows parity** — every macOS-specific concern (NSPanel
+1. **Idle-time variety** — long stretches of `idle` should occasionally
+   trigger a small jump/blink/walk so the pet feels alive instead of a
+   6-frame loop. Cheap win, JS only.
+2. **First-run onboarding** — small bubble/toast on first launch ("right
+   click me!", "I follow Claude Code"). Avoids the user not knowing the
+   tray and right-click both exist.
+3. **Codex CLI connector** — ~1 `ToolDef` entry plus the hook shape.
+   Tauri code already iterates `TOOLS` generically.
+4. **Cursor connector** — same pattern; figure out Cursor's hook surface.
+5. **Picker "Settings" sub-area** — surface Connect-toggles and the
+   Attention Sound switch inside the existing magic-glass picker so the
+   user doesn't have to hunt the tray menu. Tauri commands
+   `list_tool_connections` / `set_tool_connection` /
+   `get_attention_sound` / `set_attention_sound` already exist.
+6. **Linux / Windows parity** — every macOS-specific concern (NSPanel
    hack, asset protocol scope, tray icon) needs a per-platform plan.
-6. **Multi-pet on screen at once** — would require multiple windows and
+7. **Multi-pet on screen at once** — would require multiple windows and
    a different state-machine model. Phase 3.
-7. **Click-through on transparent pixels** — sprite-bbox hit testing so
+8. **Click-through on transparent pixels** — sprite-bbox hit testing so
    the pet's empty corners don't intercept clicks.
 
 ---
@@ -92,6 +99,32 @@ without forcing us to ship a separate `openpets` binary. Tauri commands
 `list_tool_connections` / `set_tool_connection` are exposed for the same
 logic to live in a future Settings panel or external CLI.
 
+### Attention summon: jump + shake + bubble, with a 30s re-summon
+
+Tool-confirmation prompts (Claude Code's `Notification` hook) used to map
+to the soft `review` loop. That loop alone is too easy to miss when the
+pet sits behind another window or the user looked away. The current
+recipe in `app/main.js`:
+
+1. On entering `review` or `waiting` from a non-attention state,
+   `summonAttention(target)` plays the `jumping` one-shot first, then
+   transitions into the target loop.
+2. Same call invokes `shake_window` (Rust): wiggles the window through
+   `[8,-8,6,-6,4,-4,2,-2,0]` px offsets at 35ms intervals. A flag in
+   `AppState.is_shaking` suppresses position-persistence during the
+   wiggle so we don't save the offsets as the user's chosen spot.
+3. Optional sound (`attention_sound` in `OpenPetsConfig`, default off,
+   toggled in the tray menu) plays a brief Web Audio bleep.
+4. The bubble is set to the *target* state's label so the user sees
+   "Review needed" while the pet is still in the jumping pre-roll.
+5. If the user is still in the same attention state after 30s, replay
+   the summon **silently** (no sound) — one nudge is enough.
+
+The `pendingAfterIntro` variable is what lets a generic `jumping`
+one-shot (which would normally fall back to `idle`) hand off to a
+custom target. Don't replace that with state-specific intro frames —
+the atlas only has 9 rows and `jumping` already animates well.
+
 ### Persistence layer
 
 Two distinct files under `~/.openpets/`:
@@ -123,6 +156,9 @@ hold the mutex during file I/O.
 | Hook a new AI tool (Codex / Cursor) | Add a `ToolDef` to the `TOOLS` array in `main.rs`; everything else (helper install, JSON merge, tray toggle) is generic |
 | Touch macOS window behavior | `pin_window_above_full_screen_apps` — and re-read the warning above before deleting any `objc::msg_send!` line |
 | Change what events drive the pet | The mapping is split: hook commands in `connect_tool`'s `CLAUDE_CODE_HOOKS` decide *which Claude event → which state*; the JS state machine in `main.js` decides *what each state looks like* |
+| Add a new bubble label / change wording | `STATE_LABELS` in `app/main.js`. Add the state to `PERSISTENT_BUBBLE` if it should stay until the next state change |
+| Tune the attention summon (shake amplitude, re-summon delay, sound) | `shake_window` in `main.rs` for the wiggle pattern; `RESUMMON_DELAY_MS` and `playAttentionBeep` in `app/main.js` for everything else |
+| Extend the smart helper (auto mode) | `app/scripts/openpets-event` — the inline Python `python3 -c "$(cat <<PY ... PY)"` block. Add a new `if ev == "X"` branch |
 
 ---
 

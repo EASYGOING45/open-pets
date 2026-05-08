@@ -26,6 +26,8 @@ struct OpenPetsConfig {
     active_pet_id: Option<String>,
     #[serde(default)]
     window_position: Option<WindowPos>,
+    #[serde(default)]
+    attention_sound: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Default)]
@@ -41,6 +43,9 @@ struct AppState {
     last_position_write: Mutex<Option<Instant>>,
     // Stored so the tray menu can be rebuilt after a connect/disconnect.
     tray_icon: Mutex<Option<TrayIcon>>,
+    // Set to true while shake_window is wiggling the position, so the Moved
+    // handler doesn't persist the transient offsets as the user's chosen spot.
+    is_shaking: Mutex<bool>,
 }
 
 #[derive(Serialize, Clone)]
@@ -153,6 +158,22 @@ fn build_tray_menu<R: tauri::Runtime, M: Manager<R>>(
 
     menu.append(&PredefinedMenuItem::separator(manager)?)?;
 
+    let sound_on = manager
+        .try_state::<AppState>()
+        .and_then(|s| s.config.lock().ok().map(|c| c.attention_sound))
+        .unwrap_or(false);
+    let sound_item = CheckMenuItem::with_id(
+        manager,
+        "sound:attention",
+        "Attention Sound",
+        true,
+        sound_on,
+        None::<&str>,
+    )?;
+    menu.append(&sound_item)?;
+
+    menu.append(&PredefinedMenuItem::separator(manager)?)?;
+
     let quit = MenuItem::with_id(manager, "quit", "Quit OpenPets", true, None::<&str>)?;
     menu.append(&quit)?;
 
@@ -210,6 +231,18 @@ fn handle_tray_event(app: &AppHandle, event: tauri::menu::MenuEvent) {
         if let Err(e) = show_picker_window(app) {
             eprintln!("[OpenPets] failed to open picker: {e}");
         }
+    } else if id == "sound:attention" {
+        if let Some(state) = app.try_state::<AppState>() {
+            let now = !state
+                .config
+                .lock()
+                .map(|c| c.attention_sound)
+                .unwrap_or(false);
+            update_config(&state, |cfg| cfg.attention_sound = now);
+            let _ = app.emit("attention-sound-changed", now);
+            eprintln!("[OpenPets] attention sound = {now}");
+        }
+        rebuild_tray_menu(app);
     } else if let Some(pet_id) = id.strip_prefix("pet:") {
         activate_pet(app, pet_id);
     } else if let Some(tool_id) = id.strip_prefix("connect:") {
@@ -282,6 +315,12 @@ fn update_config<F: FnOnce(&mut OpenPetsConfig)>(state: &AppState, f: F) {
 fn on_window_moved(app: &AppHandle, pos: &PhysicalPosition<i32>) {
     let Some(state) = app.try_state::<AppState>() else { return };
 
+    // Suppress writes while the attention shake is wiggling the window —
+    // those offsets aren't a user-chosen position.
+    if state.is_shaking.lock().is_ok_and(|g| *g) {
+        return;
+    }
+
     // Throttle: don't write more than ~4 times per second while dragging.
     {
         let Ok(mut last) = state.last_position_write.lock() else { return };
@@ -348,6 +387,9 @@ struct ToolDef {
 const CLAUDE_CODE_HOOKS: &[(&str, &str)] = &[
     ("SessionStart", "openpets-event idle    claude-code"),
     ("UserPromptSubmit", "openpets-event running claude-code"),
+    // PostToolUse uses `auto` so a failed tool (non-zero exit / is_error)
+    // animates `failed` instead of staying in `running`.
+    ("PostToolUse", "openpets-event auto    claude-code"),
     ("Notification", "openpets-event review  claude-code"),
     ("Stop", "openpets-event waving  claude-code"),
     ("SessionEnd", "openpets-event idle    claude-code"),
@@ -717,6 +759,71 @@ fn start_drag(window: tauri::WebviewWindow) -> Result<(), String> {
     window.start_dragging().map_err(|e| e.to_string())
 }
 
+// Briefly wiggle the pet window horizontally to grab the user's attention
+// when Claude Code is waiting for them (review / waiting state). The Moved
+// handler is told to ignore these offsets via the is_shaking flag so the
+// transient wiggle isn't persisted as the user's chosen position.
+#[tauri::command]
+fn shake_window(window: tauri::WebviewWindow, state: State<AppState>) -> Result<(), String> {
+    let origin = window.outer_position().map_err(|e| e.to_string())?;
+
+    if let Ok(mut g) = state.is_shaking.lock() {
+        if *g {
+            // A shake is already in progress — don't stack them.
+            return Ok(());
+        }
+        *g = true;
+    }
+
+    let win = window.clone();
+    let app = window.app_handle().clone();
+    std::thread::spawn(move || {
+        // Symmetric, decaying horizontal offsets — feels like a head shake.
+        let offsets: [i32; 9] = [8, -8, 6, -6, 4, -4, 2, -2, 0];
+        for off in offsets {
+            let _ = win.set_position(PhysicalPosition::new(origin.x + off, origin.y));
+            std::thread::sleep(std::time::Duration::from_millis(35));
+        }
+        // Ensure we land exactly at the original position even if the OS
+        // coalesced the last move.
+        let _ = win.set_position(PhysicalPosition::new(origin.x, origin.y));
+
+        if let Some(s) = app.try_state::<AppState>() {
+            if let Ok(mut g) = s.is_shaking.lock() {
+                *g = false;
+            }
+        }
+    });
+
+    Ok(())
+}
+
+// Pop the same menu the tray icon shows, at the cursor location. Wired to
+// right-click on the pet body so the user doesn't have to hunt for the
+// menu-bar tray icon (which macOS frequently hides when the bar is full).
+#[tauri::command]
+fn show_context_menu(app: AppHandle, window: tauri::WebviewWindow) -> Result<(), String> {
+    let pets = list_pets();
+    let menu = build_tray_menu(&app, &pets).map_err(|e| e.to_string())?;
+    window.popup_menu(&menu).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+fn get_attention_sound(state: State<AppState>) -> bool {
+    state.config.lock().map(|c| c.attention_sound).unwrap_or(false)
+}
+
+#[tauri::command]
+fn set_attention_sound(app: AppHandle, enabled: bool) -> Result<(), String> {
+    if let Some(state) = app.try_state::<AppState>() {
+        update_config(&state, |cfg| cfg.attention_sound = enabled);
+    }
+    rebuild_tray_menu(&app);
+    let _ = app.emit("attention-sound-changed", enabled);
+    Ok(())
+}
+
 // External event source: any tool that wants to drive the pet's state writes
 // JSON to ~/.openpets/state.json with shape:
 //   {"state": "<one of the 9 Codex states>", "timestamp": 1700000000, "source": "claude-code"}
@@ -865,6 +972,18 @@ fn main() {
             let pets = list_pets();
             setup_tray(app, &pets)?;
 
+            // Auto-upgrade: if the user already connected a tool in a prior
+            // version, re-run connect_tool to install any hooks we've added
+            // since (e.g. PostToolUse for failure detection). Idempotent —
+            // existing entries are skipped, missing entries are added.
+            for tool in TOOLS {
+                if is_connected_to(tool) {
+                    if let Err(e) = connect_tool(tool) {
+                        eprintln!("[OpenPets] hook re-install for {}: {e}", tool.label);
+                    }
+                }
+            }
+
             if let Some(window) = app.get_webview_window("main") {
                 pin_window_above_full_screen_apps(&window);
 
@@ -918,6 +1037,10 @@ fn main() {
             get_active_pet,
             set_active_pet,
             start_drag,
+            shake_window,
+            show_context_menu,
+            get_attention_sound,
+            set_attention_sound,
             list_tool_connections,
             set_tool_connection,
         ])

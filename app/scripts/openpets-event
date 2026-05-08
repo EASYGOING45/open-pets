@@ -1,21 +1,103 @@
 #!/usr/bin/env bash
 # openpets-event — emit a pet state change to the OpenPets desktop app.
 #
-# Usage: openpets-event <state> [source]
+# Two modes:
+#
+#   openpets-event <state> [source]
+#       Direct: write the given state to ~/.openpets/state.json.
+#       Used for hooks where the right state is fixed (SessionStart→idle,
+#       Stop→waving, etc).
+#
+#   openpets-event auto [source]
+#       Smart: read Claude Code's hook JSON from stdin, infer the right
+#       state from `hook_event_name` and `tool_response`. Used for
+#       PostToolUse so a failed tool flips the pet to `failed`.
 #
 # Valid states: idle, running, running-right, running-left, waving,
 #               jumping, failed, waiting, review
 #
-# `source` defaults to "cli" and is just a tag for diagnostics; e.g.
-#   openpets-event running   claude-code
-#   openpets-event waving    codex-cli
-#   openpets-event review    cursor
+# `source` is just a tag for diagnostics. Defaults to "cli".
 #
-# This script writes JSON to ~/.openpets/state.json atomically (write to a
-# temp file, then mv), so the OpenPets file watcher never sees a partial
-# document.
+# Atomic write: temp file + mv. The watcher in the Tauri app subscribes to
+# the directory (not the file), so an atomic rename is safe.
 
 set -euo pipefail
+
+dir="${HOME}/.openpets"
+mkdir -p "$dir"
+
+write_state() {
+  local s="$1"
+  local src="$2"
+  local tmp
+  tmp="${dir}/.state.tmp.$$"
+  trap 'rm -f "$tmp"' RETURN
+  printf '{"state":"%s","timestamp":%d,"source":"%s"}\n' \
+    "$s" \
+    "$(date +%s)" \
+    "$src" \
+    > "$tmp"
+  mv -f "$tmp" "${dir}/state.json"
+}
+
+if [[ "${1:-}" == "auto" ]]; then
+  source_label="${2:-claude-code}"
+
+  # Inline Python: parse Claude Code's hook JSON, decide the state. Python 3
+  # ships with macOS by default (and is on every dev machine that can run
+  # Claude Code in the first place), so we don't need jq or a Rust helper.
+  #
+  # Note: we use `python3 -c "$(cat <<PY ... PY)"` rather than `python3 -`
+  # because `python3 -` would attach the heredoc to python's stdin, leaving
+  # nothing for `sys.stdin.read()` to consume. With -c, stdin stays as the
+  # parent shell's stdin (the JSON pipe from the hook).
+  state=$(python3 -c "$(cat <<'PY'
+import json, sys
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    print("running"); sys.exit()
+
+ev = data.get("hook_event_name", "") or ""
+resp = data.get("tool_response")
+
+def is_error(r):
+    if isinstance(r, dict):
+        if r.get("is_error") is True:
+            return True
+        if r.get("error"):
+            return True
+        rc = r.get("returnCode") or r.get("returncode") or r.get("exit_code")
+        if isinstance(rc, int) and rc != 0:
+            return True
+    elif isinstance(r, str):
+        low = r.lower()
+        if "error" in low and "no error" not in low:
+            return True
+    return False
+
+if ev == "PostToolUse" and is_error(resp):
+    print("failed")
+elif ev == "PostToolUse":
+    print("running")
+elif ev == "PreToolUse":
+    print("running")
+elif ev == "Notification":
+    print("review")
+elif ev == "UserPromptSubmit":
+    print("running")
+elif ev in ("Stop", "SubagentStop"):
+    print("waving")
+elif ev in ("SessionStart", "SessionEnd"):
+    print("idle")
+else:
+    print("running")
+PY
+)" 2>/dev/null || echo running)
+  state="${state:-running}"
+  write_state "$state" "$source_label"
+  exit 0
+fi
 
 state="${1:-}"
 source_label="${2:-cli}"
@@ -23,6 +105,7 @@ source_label="${2:-cli}"
 if [[ -z "$state" ]]; then
   cat >&2 <<'EOF'
 usage: openpets-event <state> [source]
+       openpets-event auto [source]   (parses Claude Code hook JSON on stdin)
 
 valid states:
   idle, running, running-right, running-left, waving,
@@ -31,16 +114,4 @@ EOF
   exit 1
 fi
 
-dir="${HOME}/.openpets"
-mkdir -p "$dir"
-
-tmp="${dir}/.state.tmp.$$"
-trap 'rm -f "$tmp"' EXIT
-
-printf '{"state":"%s","timestamp":%d,"source":"%s"}\n' \
-  "$state" \
-  "$(date +%s)" \
-  "$source_label" \
-  > "$tmp"
-
-mv -f "$tmp" "${dir}/state.json"
+write_state "$state" "$source_label"

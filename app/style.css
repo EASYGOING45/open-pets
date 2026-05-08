@@ -29,3 +29,50 @@ body {
 #pet:active {
   cursor: grabbing;
 }
+
+/*
+ * Speech bubble that appears above the pet on state changes.
+ *
+ * Sits at the top of the window, overlapping what is normally the empty
+ * "sky" region above the pet sprite. `pointer-events: none` so it never
+ * intercepts clicks — drag and right-click still hit the canvas.
+ *
+ * Has two visibility classes so attention states can stay visible while
+ * transient states fade out after 2s.
+ */
+#bubble {
+  position: absolute;
+  top: 4px;
+  left: 50%;
+  transform: translateX(-50%) translateY(-2px);
+  max-width: 220px;
+  padding: 4px 10px;
+  background: rgba(20, 20, 24, 0.78);
+  color: #fff;
+  font: 600 11px/1.2 -apple-system, BlinkMacSystemFont, "SF Pro Text",
+    "Helvetica Neue", sans-serif;
+  letter-spacing: 0.1px;
+  white-space: nowrap;
+  border-radius: 10px;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.25);
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 180ms ease-out, transform 180ms ease-out;
+  text-align: center;
+}
+
+#bubble.visible {
+  opacity: 1;
+  transform: translateX(-50%) translateY(0);
+}
+
+/* A subtle pulse for attention states so the bubble itself nudges the eye. */
+#bubble.attention {
+  background: rgba(212, 64, 64, 0.92);
+  animation: bubble-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes bubble-pulse {
+  0%, 100% { box-shadow: 0 2px 6px rgba(212, 64, 64, 0.35); }
+  50% { box-shadow: 0 2px 12px rgba(212, 64, 64, 0.85); }
+}
