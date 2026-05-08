@@ -3,22 +3,42 @@
 // objc 0.2 macros emit deprecated cfg lints on modern rustc; harmless.
 #![allow(unexpected_cfgs)]
 
-use notify::{Config, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
-use serde::Serialize;
+use notify::{Config as NotifyConfig, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::sync::Mutex;
+use std::time::Instant;
 use tauri::{
     menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::TrayIconBuilder,
-    AppHandle, Builder, Emitter, LogicalPosition, Manager, State, WebviewUrl,
-    WebviewWindowBuilder, WindowEvent,
+    AppHandle, Builder, Emitter, LogicalPosition, Manager, PhysicalPosition, State,
+    WebviewUrl, WebviewWindowBuilder, WindowEvent,
 };
+
+// Persistent config saved to ~/.openpets/config.json. Distinct from
+// state.json (which is the *event* file driven by external tools); this is
+// purely OpenPets' own preferences.
+#[derive(Serialize, Deserialize, Clone, Default)]
+struct OpenPetsConfig {
+    #[serde(default)]
+    active_pet_id: Option<String>,
+    #[serde(default)]
+    window_position: Option<WindowPos>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Default)]
+struct WindowPos {
+    x: f64,
+    y: f64,
+}
 
 #[derive(Default)]
 struct AppState {
-    active_pet_id: Mutex<Option<String>>,
+    config: Mutex<OpenPetsConfig>,
+    // Throttle window-position writes so dragging doesn't pound the disk.
+    last_position_write: Mutex<Option<Instant>>,
 }
 
 #[derive(Serialize, Clone)]
@@ -147,13 +167,101 @@ fn activate_pet(app: &AppHandle, pet_id: &str) {
         return;
     };
     if let Some(state) = app.try_state::<AppState>() {
-        if let Ok(mut g) = state.active_pet_id.lock() {
-            *g = Some(pet.id.clone());
-        }
+        update_config(&state, |cfg| cfg.active_pet_id = Some(pet.id.clone()));
     }
     if let Err(e) = app.emit("pet-changed", &pet) {
         eprintln!("[OpenPets] emit pet-changed failed: {e}");
     }
+}
+
+// --- Persistent config ---------------------------------------------------
+
+const CONFIG_FILE_NAME: &str = "config.json";
+
+fn config_path() -> Option<PathBuf> {
+    state_dir().map(|d| d.join(CONFIG_FILE_NAME))
+}
+
+fn load_config() -> OpenPetsConfig {
+    let Some(path) = config_path() else {
+        return OpenPetsConfig::default();
+    };
+    let Ok(text) = fs::read_to_string(&path) else {
+        return OpenPetsConfig::default();
+    };
+    serde_json::from_str(&text).unwrap_or_default()
+}
+
+fn save_config(config: &OpenPetsConfig) {
+    let Some(dir) = state_dir() else { return };
+    if let Err(e) = fs::create_dir_all(&dir) {
+        eprintln!("[OpenPets] save_config: mkdir failed: {e}");
+        return;
+    }
+    let path = dir.join(CONFIG_FILE_NAME);
+    let tmp = dir.join(".config.tmp");
+    let Ok(text) = serde_json::to_string_pretty(config) else { return };
+    if let Err(e) = fs::write(&tmp, text) {
+        eprintln!("[OpenPets] save_config: write failed: {e}");
+        return;
+    }
+    if let Err(e) = fs::rename(&tmp, &path) {
+        eprintln!("[OpenPets] save_config: rename failed: {e}");
+    }
+}
+
+/// Lock the config, mutate via the closure, snapshot, release the lock,
+/// then atomically write the snapshot to disk. Returning a snapshot before
+/// writing means we never hold the mutex during file IO.
+fn update_config<F: FnOnce(&mut OpenPetsConfig)>(state: &AppState, f: F) {
+    let snapshot = {
+        let Ok(mut cfg) = state.config.lock() else { return };
+        f(&mut cfg);
+        cfg.clone()
+    };
+    save_config(&snapshot);
+}
+
+fn on_window_moved(app: &AppHandle, pos: &PhysicalPosition<i32>) {
+    let Some(state) = app.try_state::<AppState>() else { return };
+
+    // Throttle: don't write more than ~4 times per second while dragging.
+    {
+        let Ok(mut last) = state.last_position_write.lock() else { return };
+        let now = Instant::now();
+        if let Some(t) = *last {
+            if now.duration_since(t).as_millis() < 250 {
+                return;
+            }
+        }
+        *last = Some(now);
+    }
+
+    let scale = app
+        .get_webview_window("main")
+        .and_then(|w| w.scale_factor().ok())
+        .unwrap_or(1.0);
+    let x = pos.x as f64 / scale;
+    let y = pos.y as f64 / scale;
+
+    update_config(&state, |cfg| {
+        cfg.window_position = Some(WindowPos { x, y });
+    });
+}
+
+/// Sanity-check a saved window position against the window's current monitor.
+/// If the user disconnected the monitor that held the pet, fall back to the
+/// default placement instead of stranding the pet off-screen.
+fn position_is_on_screen(window: &tauri::WebviewWindow, p: &WindowPos) -> bool {
+    let Ok(Some(monitor)) = window.current_monitor() else {
+        return false;
+    };
+    let phys = monitor.size();
+    let scale = monitor.scale_factor();
+    let logical_w = phys.width as f64 / scale;
+    let logical_h = phys.height as f64 / scale;
+    // Require at least a corner of the window to be inside the monitor.
+    p.x > -192.0 && p.y > -208.0 && p.x < logical_w - 64.0 && p.y < logical_h - 64.0
 }
 
 fn show_picker_window(app: &AppHandle) -> tauri::Result<()> {
@@ -353,7 +461,7 @@ fn watch_state_file(app: AppHandle) {
 
     std::thread::spawn(move || {
         let (tx, rx) = mpsc::channel();
-        let mut watcher = match RecommendedWatcher::new(tx, Config::default()) {
+        let mut watcher = match RecommendedWatcher::new(tx, NotifyConfig::default()) {
             Ok(w) => w,
             Err(e) => {
                 eprintln!("[OpenPets] failed to create file watcher: {e}");
@@ -387,7 +495,7 @@ fn watch_state_file(app: AppHandle) {
 
 #[tauri::command]
 fn get_active_pet(state: State<AppState>) -> Option<Pet> {
-    let id = state.active_pet_id.lock().ok()?.clone()?;
+    let id = state.config.lock().ok()?.active_pet_id.clone()?;
     list_pets().into_iter().find(|p| p.id == id)
 }
 
@@ -398,10 +506,7 @@ fn set_active_pet(id: String, app: AppHandle) -> Result<Pet, String> {
         .find(|p| p.id == id)
         .ok_or_else(|| format!("pet '{id}' not found"))?;
     if let Some(state) = app.try_state::<AppState>() {
-        *state
-            .active_pet_id
-            .lock()
-            .map_err(|e| e.to_string())? = Some(pet.id.clone());
+        update_config(&state, |cfg| cfg.active_pet_id = Some(pet.id.clone()));
     }
     app.emit("pet-changed", &pet).map_err(|e| e.to_string())?;
     Ok(pet)
@@ -411,6 +516,16 @@ fn main() {
     Builder::default()
         .manage(AppState::default())
         .setup(|app| {
+            // Hydrate the in-memory config from disk (active pet, window
+            // position). First-run users get a default, returning users
+            // pick up where they left off.
+            let loaded = load_config();
+            if let Some(state) = app.try_state::<AppState>() {
+                if let Ok(mut cfg) = state.config.lock() {
+                    *cfg = loaded.clone();
+                }
+            }
+
             let pets = list_pets();
             setup_tray(app, &pets)?;
 
@@ -420,17 +535,32 @@ fn main() {
                 // Reapply the pin on focus events. If macOS reverts the
                 // collection behavior when the window crosses Spaces (some
                 // versions do), this catches it.
-                let win = window.clone();
+                let pin_target = window.clone();
                 window.on_window_event(move |event| {
                     if let tauri::WindowEvent::Focused(true) = event {
                         eprintln!("[OpenPets] focus event → reapplying pin");
-                        pin_window_above_full_screen_apps(&win);
+                        pin_window_above_full_screen_apps(&pin_target);
                     }
                 });
 
-                // Park the pet in the bottom-right of the primary screen so it
-                // does not cover the user's working area on first launch.
-                if let Ok(Some(monitor)) = window.current_monitor() {
+                // Persist window position when the user drags the pet around
+                // (throttled to once per ~250ms so a continuous drag doesn't
+                // pound the disk).
+                let app_handle = app.handle().clone();
+                window.on_window_event(move |event| {
+                    if let tauri::WindowEvent::Moved(pos) = event {
+                        on_window_moved(&app_handle, pos);
+                    }
+                });
+
+                // Position: previous session > bottom-right default.
+                let restored = loaded
+                    .window_position
+                    .as_ref()
+                    .filter(|p| position_is_on_screen(&window, p));
+                if let Some(p) = restored {
+                    let _ = window.set_position(LogicalPosition::new(p.x, p.y));
+                } else if let Ok(Some(monitor)) = window.current_monitor() {
                     let phys = monitor.size();
                     let scale = monitor.scale_factor();
                     let logical_w = phys.width as f64 / scale;

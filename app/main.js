@@ -121,9 +121,12 @@ async function init() {
     return;
   }
 
-  // Default to the first pet; `set_active_pet` also stores it as the active
-  // selection so the picker window can highlight it correctly.
-  await invoke("set_active_pet", { id: pets[0].id });
+  // Restore the previously-active pet from the persisted config; if the
+  // user uninstalled it (or this is the first launch), fall back to the
+  // first pet alphabetically.
+  const persisted = await invoke("get_active_pet");
+  const initialId = persisted?.id ?? pets[0].id;
+  await invoke("set_active_pet", { id: initialId });
 }
 
 // Window drag is invoked explicitly via a Rust command on mousedown. The OS

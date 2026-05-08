@@ -3,6 +3,7 @@
 // and on focus loss as well (focus-loss handled by the Rust side).
 
 const { invoke, convertFileSrc } = window.__TAURI__.core;
+const { listen } = window.__TAURI__.event;
 const pickerWindow = window.__TAURI__.window.getCurrentWindow();
 
 // Atlas contract: 1536x1872 image, 8 columns × 9 rows, cells 192x208.
@@ -17,6 +18,7 @@ function buildCard(pet, isActive) {
   const card = document.createElement("button");
   card.type = "button";
   card.className = "pet-card" + (isActive ? " is-active" : "");
+  card.dataset.petId = pet.id;
   card.title = pet.description || pet.display_name;
 
   const thumb = document.createElement("div");
@@ -75,6 +77,16 @@ async function init() {
 document.addEventListener("keydown", (e) => {
   if (e.key === "Escape") {
     pickerWindow.hide();
+  }
+});
+
+// If the user switches pet via the tray menu while the picker happens to be
+// open, mirror the highlight without rebuilding the grid.
+listen("pet-changed", (event) => {
+  const newId = event.payload?.id;
+  if (!newId) return;
+  for (const card of grid.querySelectorAll(".pet-card")) {
+    card.classList.toggle("is-active", card.dataset.petId === newId);
   }
 });
 
