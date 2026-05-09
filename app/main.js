@@ -6,6 +6,15 @@
 
 const { invoke, convertFileSrc } = window.__TAURI__.core;
 const { listen } = window.__TAURI__.event;
+const currentWindow = window.__TAURI__.window.getCurrentWindow();
+
+// Tauri 2's setSize accepts any object with `type: "Logical"` and
+// width/height fields — we don't need to import the LogicalSize class
+// (which lives at __TAURI__.dpi in some versions and would break here
+// if we got the namespace wrong).
+function logicalSize(width, height) {
+  return { type: "Logical", width, height };
+}
 
 const CELL_W = 192;
 const CELL_H = 208;
@@ -51,7 +60,16 @@ const BUBBLE_HOLD_MS = 2200;
 const canvas = document.getElementById("pet");
 const ctx = canvas.getContext("2d");
 const bubbleEl = document.getElementById("bubble");
+const menuEl = document.getElementById("menu");
+const menuListEl = document.getElementById("menu-list");
 let img = new Image();
+
+const WINDOW_COMPACT = { w: 256, h: 256 };
+// Tall enough to fit the worst-case menu (4 pets + Choose + Connect + Sound +
+// Quit + section labels & separators). #menu-list also has max-height +
+// overflow-y so users with many installed pets get a scrollable menu instead
+// of clipped items.
+const WINDOW_WITH_MENU = { w: 256, h: 620 };
 
 let state = "idle";
 let frame = 0;
@@ -263,26 +281,290 @@ async function init() {
   await invoke("set_active_pet", { id: initialId });
 }
 
-// Window drag is invoked explicitly via a Rust command on mousedown. The OS
-// then takes over the gesture: short presses without movement fall through
-// to the `click` event (→ wave); presses with movement become a window drag.
+// Window drag uses a movement-threshold approach. Two earlier attempts both
+// regressed: invoking start_dragging on every mousedown raced quick clicks
+// (mouseup landed before AppKit's performWindowDrag, throwing an NSException
+// Rust couldn't unwind); putting `data-tauri-drag-region` on the canvas
+// blocked ALL canvas mouse events on macOS NSPanel + WKWebView, so neither
+// drag nor right-click reached us.
+//
+// Recipe: on left-button mousedown, record the screen-coords origin. On
+// mousemove past DRAG_THRESHOLD_PX, call startDragging() once — by then
+// AppKit's drag tracker has a real mouse-still-down to lock onto, no
+// NSException. Right-clicks and short clicks never enter this path, so
+// contextmenu and click-to-wave both fire normally.
+const DRAG_THRESHOLD_PX = 3;
+let dragOrigin = null;
+let dragInitiated = false;
+
 canvas.addEventListener("mousedown", (e) => {
   if (e.button !== 0) return;
-  invoke("start_drag").catch((err) => console.error("start_drag failed:", err));
+  dragOrigin = { x: e.screenX, y: e.screenY };
+  dragInitiated = false;
 });
 
-canvas.addEventListener("click", () => setState("waving"));
+// Listen on the canvas, not window/document: on a transparent NSPanel,
+// mouse events over the transparent body area don't reach the WebView
+// at all (they pass through to apps underneath). The first 3px of any
+// drag is still over the pet sprite though, so this fires reliably.
+canvas.addEventListener("mousemove", (e) => {
+  if (!dragOrigin || dragInitiated) return;
+  const dx = e.screenX - dragOrigin.x;
+  const dy = e.screenY - dragOrigin.y;
+  if (dx * dx + dy * dy < DRAG_THRESHOLD_PX * DRAG_THRESHOLD_PX) return;
+  dragInitiated = true;
+  currentWindow
+    .startDragging()
+    .catch((err) => console.error("startDragging failed:", err));
+});
 
-// Right-click anywhere in the window pops the same menu as the tray icon.
-// The macOS menu bar frequently hides the tray icon when the bar is full,
-// so this is the always-available path for switching pets, connecting
-// Claude Code, toggling sound, and quitting. We listen on the document so
-// the transparent corners around the pet are also valid right-click zones.
+window.addEventListener("mouseup", () => {
+  dragOrigin = null;
+  // Defer the dragInitiated reset so the click handler (which fires AFTER
+  // mouseup) can still tell drag-finish from a real click and suppress the
+  // wave animation when the gesture was a drag.
+  setTimeout(() => {
+    dragInitiated = false;
+  }, 0);
+});
+
+canvas.addEventListener("click", () => {
+  // The mouseup that ended a drag also fires a click — ignore it.
+  if (dragInitiated) return;
+  // While the inline menu is open, clicking the pet dismisses it
+  // instead of triggering a wave.
+  if (menuIsOpen) {
+    closeInlineMenu();
+    return;
+  }
+  setState("waving");
+});
+
+// ---------------------------------------------------------------------
+// Inline right-click menu
+// ---------------------------------------------------------------------
+//
+// We render the menu *inside the pet window itself* rather than opening
+// a separate Tauri window. Two reasons:
+//
+//   1. Cross-Space visibility: the pet window is already pinned (NSPanel
+//      + fullScreenAuxiliary at app startup). A child div inherits that
+//      visibility for free, so the menu shows on full-screen Spaces.
+//   2. Stability: opening a new transparent NSPanel mid-event-loop on
+//      macOS 26 reliably aborts the app via NSException during the
+//      class swap. Staying inside the existing panel sidesteps it.
+//
+// The window grows from 256x256 to 256x500 while the menu is visible so
+// the menu has room below the pet sprite, then shrinks back on close.
+// The pet's vertical position stays fixed because the body uses
+// `align-items: flex-start` with a 24px top padding.
+
+let menuIsOpen = false;
+let pendingMenuHide = null;
+// Set to true for ~300ms while the menu is opening — so the resize-induced
+// transient blur (setSize 256→620) doesn't auto-close us right away.
+let menuOpenGrace = false;
+// If the pet sits near the screen bottom, growing to 256x500 can push
+// the window off-screen and AppKit shifts it up. We snapshot the
+// pre-open position and restore it after the menu collapses, so the
+// pet ends up exactly where it started.
+let savedWindowPosition = null;
+
+function makeMenuItem(label, onClick, opts = {}) {
+  const li = document.createElement("li");
+  li.className =
+    "menu-item" +
+    (opts.checked ? " checked" : "") +
+    (opts.danger ? " danger" : "");
+  li.textContent = label;
+  li.addEventListener("click", async (e) => {
+    e.stopPropagation();
+    closeInlineMenu();
+    try {
+      await onClick();
+    } catch (err) {
+      console.error(`menu action "${label}" failed:`, err);
+    }
+  });
+  return li;
+}
+
+function makeSeparator() {
+  const li = document.createElement("li");
+  li.className = "menu-separator";
+  return li;
+}
+
+function makeSectionLabel(text) {
+  const li = document.createElement("li");
+  li.className = "menu-section-label";
+  li.textContent = text;
+  return li;
+}
+
+async function buildMenuContent() {
+  menuListEl.innerHTML = "";
+
+  let pets = [];
+  let persisted = null;
+  let tools = [];
+  let soundOn = false;
+  try {
+    [pets, persisted, tools, soundOn] = await Promise.all([
+      invoke("list_pets"),
+      invoke("get_active_pet"),
+      invoke("list_tool_connections"),
+      invoke("get_attention_sound"),
+    ]);
+  } catch (e) {
+    console.error("buildMenuContent fetch failed:", e);
+  }
+  const activeId = persisted?.id;
+
+  if (pets.length) {
+    menuListEl.appendChild(makeSectionLabel("Pet"));
+    for (const pet of pets) {
+      menuListEl.appendChild(
+        makeMenuItem(
+          pet.display_name,
+          () => invoke("set_active_pet", { id: pet.id }),
+          { checked: pet.id === activeId },
+        ),
+      );
+    }
+    menuListEl.appendChild(
+      makeMenuItem("Choose Pet…", () => invoke("show_picker_window_cmd")),
+    );
+    menuListEl.appendChild(makeSeparator());
+  }
+
+  if (tools.length) {
+    menuListEl.appendChild(makeSectionLabel("Integrations"));
+    for (const [id, label, connected] of tools) {
+      menuListEl.appendChild(
+        makeMenuItem(
+          `Connect to ${label}`,
+          () => invoke("set_tool_connection", { id, connected: !connected }),
+          { checked: connected },
+        ),
+      );
+    }
+    menuListEl.appendChild(makeSeparator());
+  }
+
+  menuListEl.appendChild(makeSectionLabel("Settings"));
+  menuListEl.appendChild(
+    makeMenuItem(
+      "Attention Sound",
+      () => invoke("set_attention_sound", { enabled: !soundOn }),
+      { checked: soundOn },
+    ),
+  );
+  menuListEl.appendChild(makeSeparator());
+
+  menuListEl.appendChild(
+    makeMenuItem("Quit OpenPets", () => invoke("quit_app"), { danger: true }),
+  );
+}
+
+async function openInlineMenu() {
+  if (menuIsOpen) return;
+  menuIsOpen = true;
+  menuOpenGrace = true;
+  setTimeout(() => {
+    menuOpenGrace = false;
+  }, 300);
+  if (pendingMenuHide) {
+    clearTimeout(pendingMenuHide);
+    pendingMenuHide = null;
+  }
+  try {
+    savedWindowPosition = await currentWindow.outerPosition();
+  } catch (e) {
+    savedWindowPosition = null;
+  }
+  // Tell Rust to ignore Moved events for the duration of the resize — when
+  // the pet sits near the screen bottom AppKit shifts the window upward to
+  // keep the new 500px height on screen, and we don't want that transient
+  // shift saved as the user's chosen pet position.
+  await invoke("set_menu_resizing", { resizing: true }).catch(() => {});
+  try {
+    await currentWindow.setSize(
+      logicalSize(WINDOW_WITH_MENU.w, WINDOW_WITH_MENU.h),
+    );
+  } catch (e) {
+    console.error("setSize (expand) failed:", e);
+  }
+  // Give AppKit one frame to settle any auto-shift before we re-enable
+  // position persistence.
+  setTimeout(() => {
+    invoke("set_menu_resizing", { resizing: false }).catch(() => {});
+  }, 50);
+  await buildMenuContent();
+  menuEl.hidden = false;
+  // Trigger CSS transition on next frame so initial styles apply first.
+  requestAnimationFrame(() => menuEl.classList.add("open"));
+}
+
+function closeInlineMenu() {
+  if (!menuIsOpen) return;
+  menuIsOpen = false;
+  menuEl.classList.remove("open");
+  // Wait for the fade-out before hiding the element and shrinking the
+  // window — keeps the animation visible and avoids a content-shift jolt.
+  pendingMenuHide = setTimeout(async () => {
+    pendingMenuHide = null;
+    if (menuIsOpen) return; // re-opened during the timeout
+    menuEl.hidden = true;
+    await invoke("set_menu_resizing", { resizing: true }).catch(() => {});
+    try {
+      await currentWindow.setSize(
+        logicalSize(WINDOW_COMPACT.w, WINDOW_COMPACT.h),
+      );
+      if (savedWindowPosition) {
+        await currentWindow.setPosition(savedWindowPosition);
+      }
+    } catch (e) {
+      console.error("setSize/restore (shrink) failed:", e);
+    }
+    setTimeout(() => {
+      invoke("set_menu_resizing", { resizing: false }).catch(() => {});
+    }, 50);
+    savedWindowPosition = null;
+  }, 160);
+}
+
 document.addEventListener("contextmenu", (e) => {
   e.preventDefault();
-  invoke("show_context_menu").catch((err) =>
-    console.error("show_context_menu failed:", err),
-  );
+  if (menuIsOpen) {
+    closeInlineMenu();
+  } else {
+    openInlineMenu();
+  }
+});
+
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && menuIsOpen) closeInlineMenu();
+});
+
+// In-WebView click outside #menu (e.g. on the pet itself, the bubble
+// region) dismisses the menu. Clicks on transparent body areas don't
+// reach the WebView at all on macOS NSPanel, which is why this alone
+// isn't enough — see the focus listener below.
+document.addEventListener("click", (e) => {
+  if (!menuIsOpen) return;
+  if (e.target.closest("#menu")) return;
+  closeInlineMenu();
+});
+
+// Window-blur dismiss: clicking anywhere outside our window (other apps,
+// the desktop, transparent regions of our own window) makes AppKit move
+// keyboard focus away from us. Because the pet window is a non-activating
+// NSPanel, click-through is the dominant mode of "user clicked elsewhere"
+// — a plain `document.click` listener never sees those clicks. The Tauri
+// onFocusChanged signal is the reliable proxy.
+currentWindow.onFocusChanged(({ payload: focused }) => {
+  if (!focused && menuIsOpen && !menuOpenGrace) closeInlineMenu();
 });
 
 init();

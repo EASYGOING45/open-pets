@@ -4,6 +4,9 @@
   "description": "Default capabilities for the OpenPets main window",
   "windows": ["main", "picker"],
   "permissions": [
-    "core:default"
+    "core:default",
+    "core:window:allow-start-dragging",
+    "core:window:allow-set-size",
+    "core:window:allow-set-position"
   ]
 }

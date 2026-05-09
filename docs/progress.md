@@ -5,11 +5,23 @@ the project is, what's open, and what we'd want to remember next time we
 sit down to keep building. Pair with `CLAUDE.md` (orientation) and the
 auto-memory feedback files (lessons).
 
-> **Last updated**: 2026-05-08 — Phase 2.C UX polish landed: attention
-> summon (jump + window shake + opt-in sound) for review/waiting,
-> right-click pet → tray menu, status bubbles with friendly labels,
-> smarter `openpets-event auto` mode that promotes failed PostToolUse
-> calls to the `failed` animation.
+> **Last updated**: 2026-05-09 — Drag + right-click regression cluster
+> fixed in four passes:
+> 1. Swapped `data-tauri-drag-region` (which kills *all* mouse events
+>    on transparent NSPanel canvas, including right-click) for a
+>    movement-threshold drag in JS.
+> 2. Added `is_resizing` guard so the 256→620 menu expand doesn't
+>    persist AppKit's auto-shift as the user's pet position.
+> 3. Granted three Tauri 2 capabilities the JS API needed
+>    (`start-dragging`, `set-size`, `set-position`) — `core:default`
+>    is read-only, every window-mutating call needs an explicit allow.
+> 4. Sized the menu container to fit (window 620px + `#menu-list`
+>    `max-height` for overflow) and added `onFocusChanged` close so
+>    clicks outside the WebView (which never reach `document.click`
+>    on a transparent panel) actually dismiss the menu.
+>
+> See the four "Architectural decisions" entries that go with these,
+> and the new "Common pitfalls" section at the bottom.
 
 ---
 
@@ -74,6 +86,86 @@ This is documented in:
 
 If you ever rewrite that function, **do not drop the `object_setClass`
 call**.
+
+### Drag handling on transparent NSPanel
+
+Three approaches tried, only the third works reliably on macOS 26 +
+NSPanel + WKWebView:
+
+1. **`canvas.addEventListener("mousedown", () => invoke("start_drag"))`**
+   — calls `start_dragging` on every mousedown. Quick clicks race:
+   `mouseup` lands before AppKit's `performWindowDrag` returns,
+   throwing an NSException Rust can't unwind through. App crashes.
+2. **`<canvas data-tauri-drag-region>`** — Tauri's native attribute.
+   Drag itself works on opaque/regular windows, but on a transparent
+   NSPanel the attribute swallows *every* mouse event on the canvas
+   including right-click and middle-click. Result: drag flaky AND the
+   `contextmenu` event never reaches the WebView, so the inline menu
+   can't open.
+3. **Movement-threshold drag in JS** *(current)* — record screen-coord
+   origin on left-button mousedown; once `mousemove` shows the pointer
+   has traveled past `DRAG_THRESHOLD_PX` (3px), call
+   `currentWindow.startDragging()` exactly once. By then the mouse is
+   verified to still be down (we're inside an active mousemove), no
+   NSException race. Right-clicks and short clicks never enter the
+   path, so `contextmenu` and click-to-wave both fire normally.
+
+If you ever simplify the drag logic, **don't go back to either of the
+first two** — the failure modes are silent (drag-region) or
+catastrophic (bare start_drag).
+
+### Tauri 2 capability allow-list is read-only by default
+
+`capabilities/default.json` references `core:default`, which expands to
+`core:window:default` + ~7 sibling plugin defaults. The window default
+is read-only — `inner-position`, `outer-position`, `is-fullscreen`,
+etc. — but does **not** include any mutating call. Anything in the
+JS API that changes window state (`startDragging`, `setSize`,
+`setPosition`, `setMinimizable`, …) is silently rejected at the IPC
+gate unless allow-listed.
+
+Symptoms when you forget: `currentWindow.startDragging()` no-ops
+without throwing; `setSize` no-ops with a permission-denied error
+that's only visible if devtools is open; the inline menu appears half
+-resized because the resize call was rejected.
+
+OpenPets currently allows: `core:window:allow-start-dragging`,
+`allow-set-size`, `allow-set-position`. If you add a new JS-side window
+mutation, add the matching `core:window:allow-…` entry to
+`capabilities/default.json` AND verify the symptom is gone in dev. Do
+**not** route around this with custom Rust commands unless there's a
+real reason — the capability list is the supported path and serves as
+documentation of the trust boundary.
+
+Counter-pattern: don't replace `currentWindow.startDragging()` with
+`invoke("start_drag")`. Custom commands aren't capability-gated, so
+they "work" without grants, but you lose the JS API's built-in race
+protection (the threshold-drag recipe in main.js depends on calling
+`startDragging` *during* an active mousemove).
+
+### Dismissing the inline menu on transparent NSPanel
+
+`document.click` listeners only fire when the click lands on an
+**opaque** WebView element. On the pet window the canvas is the only
+opaque region; the rest of the body is transparent so click events on
+those pixels go straight through to the OS / desktop / underlying app.
+
+That means the obvious "click outside the menu to close it" recipe
+(listen on document, check `e.target.closest("#menu")`) only catches
+clicks on the pet sprite itself, not clicks on the desktop or another
+app. Users *expect* clicking anywhere outside the menu to close it.
+
+We use Tauri's `currentWindow.onFocusChanged(({ payload: focused }))`
+as the cross-platform proxy for "user clicked elsewhere." When focus
+leaves the pet window we close the menu. Two subtleties:
+
+1. The setSize 256→620 that opens the menu can itself produce a
+   transient blur on macOS. We set `menuOpenGrace = true` for 300ms
+   inside `openInlineMenu`; the focus listener no-ops while it's set.
+2. Right-click on the pet *while the menu is already open* should
+   toggle it closed (covered by the `contextmenu` handler), and Esc
+   should close it (covered by the `keydown` handler). The blur path
+   is the *third* dismiss route, not the only one.
 
 ### Why file watching, not a socket
 
@@ -162,6 +254,132 @@ hold the mutex during file I/O.
 
 ---
 
+## 🐛 Common pitfalls & quick fixes
+
+When a Claude Code session sits down to debug the desktop app, scan
+this list before going deep on a fresh root-cause hunt. Every entry
+here is a real trap we've hit, with the symptom and the patch.
+
+### "I edited HTML/JS but the new code isn't running"
+
+The frontend is **embedded into the Rust binary** at compile time via
+`tauri::generate_context!`. `app/`'s HTML/JS/CSS files are copied
+into the binary by `cargo`, not loaded live by `tauri dev`. If only
+the frontend changed, cargo's incremental cache may not invalidate,
+so `tauri dev` happily ships the previous embed.
+
+The reliable trigger is to bump `BUILD_TAG` in `main.rs` — anything,
+e.g. append `-v2`. Tauri dev's file watcher then sees `main.rs`
+change and re-runs the macro. Rule of thumb: **every
+frontend-touching session should bump BUILD_TAG before the user
+re-tests.**
+
+### "My JS-side `currentWindow.X()` call silently doesn't do anything"
+
+You're hitting Tauri 2's capability gate. `core:default` is read-only.
+Every mutating window call needs an explicit allow in
+`capabilities/default.json`. See "Tauri 2 capability allow-list" in
+the decisions section. Common ones:
+
+| JS API | Capability needed |
+| --- | --- |
+| `startDragging()` | `core:window:allow-start-dragging` |
+| `setSize(...)` | `core:window:allow-set-size` |
+| `setPosition(...)` | `core:window:allow-set-position` |
+| `setSize` + `setPosition` together | both, separately |
+| `setFocus()` | `core:window:allow-set-focus` |
+| `hide()/show()` | `core:window:allow-hide` / `…allow-show` |
+| `close()` | `core:window:allow-close` |
+
+If you don't have devtools open, the rejection looks like *nothing
+happens* — no exception. The only diagnostic clue is comparing the
+list of granted permissions in `capabilities/default.json` against
+what you call.
+
+### "cargo check / tauri dev hangs forever on `Compiling openpets`"
+
+The Tauri 2 macro expansion (`generate_context!`,
+`generate_handler!`) is heavy on its own, and an inconsistent
+incremental cache can make rustc thrash for 15-20 minutes producing
+nothing. If a single-crate compile sits at full CPU with no output
+beyond "Compiling openpets" for more than ~3 min:
+
+```bash
+rm -rf app/src-tauri/target/debug/incremental
+```
+
+Re-run. Cold compile takes ~1 min on this machine; subsequent
+incrementals are ~0.5s. If clearing the cache doesn't help, the bug
+is real — read the diff for genuine errors.
+
+### "I run `npm run dev` and it errors with `cargo metadata: No such file or directory`"
+
+`npm` runs in a subshell that doesn't pick up `~/.cargo/bin` from
+your zsh profile. Run with PATH explicit:
+
+```bash
+PATH="$HOME/.cargo/bin:$PATH" npm run dev
+```
+
+### "Mouse events on the canvas aren't firing"
+
+Two failure modes that both produce "the pet is unclickable":
+
+1. `data-tauri-drag-region` was added to the canvas. On transparent
+   NSPanel + WKWebView this attribute swallows *every* mouse event
+   on the element including right-click. Remove the attribute and
+   use the JS movement-threshold drag (see decisions).
+2. The user is testing a stale build. Verify by greping the dev log
+   for the `[OpenPets] build:` line and confirming the BUILD_TAG
+   matches your latest source.
+
+### "The inline menu only shows a thin border / partial frame"
+
+The `setSize(256, 620)` IPC was rejected by capabilities so the
+window stayed at 256×256, clipping everything below. Add
+`core:window:allow-set-size` to capabilities. If it's already there,
+check the JS log for `setSize (expand) failed:` errors — your menu
+height may be too tall for the screen.
+
+### "Clicking outside the menu doesn't close it"
+
+`document.click` doesn't fire on transparent body regions of an
+NSPanel — those clicks go through to the OS. Use
+`currentWindow.onFocusChanged(({ payload: focused }))` to catch the
+blur event when the user clicks anywhere outside the WebView.
+Remember the `menuOpenGrace` flag so the open-time resize doesn't
+auto-close (see decisions).
+
+### "After closing the menu, the pet jumps to a slightly different place"
+
+The 256→620 expand near the screen bottom makes AppKit auto-shift
+the window upward to keep it on screen. Without the `is_resizing`
+flag, that shift fires `WindowEvent::Moved` which is persisted to
+config. Make sure JS calls `set_menu_resizing(true)` *before*
+setSize and `set_menu_resizing(false)` after a settle delay; on
+the Rust side, `on_window_moved` should bail when `is_resizing` is
+true. (Same pattern as `is_shaking` for the attention shake.)
+
+### "I changed `~/.openpets/state.json` but the pet didn't update"
+
+The Rust watcher watches the **directory**, not the file — atomic
+`mv` writes break per-file FSEvents subscriptions on macOS. Use the
+`openpets-event` helper (`~/.local/bin/openpets-event`) which does
+the right tmp+rename dance, or replicate it manually. Don't use
+`echo > state.json` for testing; that produces partial reads.
+
+### "Right-click menu opens but text/items invisible"
+
+This is what happens when one of the four `Promise.all` invokes in
+`buildMenuContent` rejects (e.g. capability denial on a Tauri
+command you forgot to allow). The catch silently swallows it and
+all four results stay at their defaults. Open the actual webview
+console (right-click in dev mode → Inspect Element) to see the
+error — the project ships with `withGlobalTauri: true` so the JS
+console errors are real.
+
+---
+
 ## 📚 Auto-memory cross-reference
 
 These live in
@@ -176,6 +394,8 @@ and load automatically into every Claude Code session in this repo:
 | `feedback_roco_world_rightsholder.md` | Roco World is Tencent, not TaoMee |
 | `feedback_macos_overlay_window_recipe.md` | The NSPanel hack, in one place |
 | `feedback_users_wont_edit_settings_json.md` | Why every "Connect to X" path must collapse to a single click |
+| `feedback_drag_region_breaks_nspanel.md` | `data-tauri-drag-region` kills *all* canvas mouse events on transparent NSPanel — use JS threshold drag |
+| `feedback_tauri2_capabilities_default_is_readonly.md` | `core:default` does not include window-mutating calls; allow-list each one explicitly |
 
 ---
 
@@ -184,12 +404,19 @@ and load automatically into every Claude Code session in this repo:
 When you (or a fresh Claude Code session) sits down to keep going, the
 fastest path back to context is:
 
-1. **Read this file**.
+1. **Read this file** end-to-end. The "Common pitfalls" section
+   alone saves several debug detours.
 2. `git log --oneline -10` for what just shipped.
 3. `cat ~/.openpets/config.json` if you're touching the desktop app.
 4. Re-read `feedback_macos_overlay_window_recipe.md` if anything in
    `pin_window_above_full_screen_apps` looks suspect.
-5. Ask the user *which* of the "⏳ Next" items they want to start on, or
+5. Before writing JS that calls `currentWindow.X()`, check
+   `app/src-tauri/capabilities/default.json` — the API silently no-ops
+   if the matching `core:window:allow-…` permission isn't listed.
+6. If you change frontend files and ask the user to retest, bump
+   `BUILD_TAG` in `main.rs` so cargo re-embeds the assets. Without
+   this bump the user keeps testing the old embed.
+7. Ask the user *which* of the "⏳ Next" items they want to start on, or
    whether they're picking up something not on the list yet.
 
 ---

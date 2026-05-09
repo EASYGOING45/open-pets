@@ -12,15 +12,21 @@ body {
   overflow: hidden;
   user-select: none;
   -webkit-user-select: none;
-}
-
-body {
-  display: flex;
-  align-items: center;
-  justify-content: center;
+  /*
+   * Plain block layout: every child positions itself absolutely so the
+   * pet's screen y-coordinate stays fixed regardless of window height
+   * (which we toggle 256↔500 to make room for the inline menu). Flex
+   * centering would re-center the canvas inside a taller window and
+   * make the pet jump.
+   */
+  position: relative;
 }
 
 #pet {
+  position: absolute;
+  top: 24px;
+  left: 50%;
+  transform: translateX(-50%);
   display: block;
   image-rendering: pixelated;
   cursor: grab;
@@ -31,14 +37,9 @@ body {
 }
 
 /*
- * Speech bubble that appears above the pet on state changes.
- *
- * Sits at the top of the window, overlapping what is normally the empty
- * "sky" region above the pet sprite. `pointer-events: none` so it never
- * intercepts clicks — drag and right-click still hit the canvas.
- *
- * Has two visibility classes so attention states can stay visible while
- * transient states fade out after 2s.
+ * Speech bubble that appears above the pet on state changes. Sits at
+ * the top of the window in the empty "sky" region above the pet sprite.
+ * `pointer-events: none` so it never intercepts clicks.
  */
 #bubble {
   position: absolute;
@@ -59,6 +60,7 @@ body {
   opacity: 0;
   transition: opacity 180ms ease-out, transform 180ms ease-out;
   text-align: center;
+  z-index: 5;
 }
 
 #bubble.visible {
@@ -66,7 +68,6 @@ body {
   transform: translateX(-50%) translateY(0);
 }
 
-/* A subtle pulse for attention states so the bubble itself nudges the eye. */
 #bubble.attention {
   background: rgba(212, 64, 64, 0.92);
   animation: bubble-pulse 1.6s ease-in-out infinite;
@@ -75,4 +76,115 @@ body {
 @keyframes bubble-pulse {
   0%, 100% { box-shadow: 0 2px 6px rgba(212, 64, 64, 0.35); }
   50% { box-shadow: 0 2px 12px rgba(212, 64, 64, 0.85); }
+}
+
+/*
+ * Inline menu — positioned below the pet at a fixed offset. Hidden by
+ * default. JS resizes the window from 256x256 → 256x500 before showing
+ * to give the menu vertical room.
+ */
+#menu {
+  position: absolute;
+  top: 250px; /* canvas bottom (24+208=232) + 18px gap */
+  left: 50%;
+  width: 220px;
+  transform: translateX(-50%) translateY(-6px);
+  opacity: 0;
+  transition: opacity 140ms ease-out, transform 140ms ease-out;
+  z-index: 10;
+}
+
+#menu[hidden] {
+  display: none;
+}
+
+#menu.open {
+  opacity: 1;
+  transform: translateX(-50%) translateY(0);
+}
+
+/* Connector triangle pointing from the menu up at the pet. */
+#menu::before {
+  content: "";
+  position: absolute;
+  top: -5px;
+  left: 50%;
+  transform: translateX(-50%) rotate(45deg);
+  width: 10px;
+  height: 10px;
+  background: rgb(34, 34, 38);
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  border-left: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+#menu-list {
+  list-style: none;
+  background: rgb(34, 34, 38);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 10px;
+  padding: 5px 0;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.5);
+  color: #f5f5f7;
+  font: 13px/1.3 -apple-system, BlinkMacSystemFont, "SF Pro Text",
+    "Helvetica Neue", sans-serif;
+  /* Bound the menu's vertical size so a user with many installed pets can
+     scroll the list instead of having items clipped off the window bottom.
+     ~window 620 - menu top 250 - 12px breathing room = 358px. */
+  max-height: 358px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  position: relative;
+}
+
+.menu-item {
+  position: relative;
+  padding: 5px 14px 5px 28px;
+  cursor: default;
+  white-space: nowrap;
+  line-height: 1.4;
+  border-radius: 4px;
+  margin: 0 4px;
+}
+
+.menu-item:hover {
+  background: rgb(58, 110, 220);
+  color: #fff;
+}
+
+.menu-item.checked::before {
+  content: "";
+  position: absolute;
+  left: 13px;
+  top: 50%;
+  width: 5px;
+  height: 9px;
+  border: solid currentColor;
+  border-width: 0 1.5px 1.5px 0;
+  transform: translateY(-65%) rotate(45deg);
+  opacity: 0.9;
+}
+
+.menu-item.danger {
+  color: #ff6b6b;
+}
+.menu-item.danger:hover {
+  background: rgba(220, 60, 60, 0.85);
+  color: #fff;
+}
+
+.menu-separator {
+  height: 1px;
+  background: rgba(255, 255, 255, 0.08);
+  margin: 5px 8px;
+  pointer-events: none;
+}
+
+.menu-section-label {
+  padding: 4px 14px 2px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.4px;
+  text-transform: uppercase;
+  color: rgba(245, 245, 247, 0.5);
+  pointer-events: none;
 }

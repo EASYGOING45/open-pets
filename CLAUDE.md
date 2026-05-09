@@ -20,9 +20,13 @@ contains:
 ## Where to look for context (in order)
 
 1. **[`docs/progress.md`](docs/progress.md)** — current phase status,
-   what's done, what's next, key architectural decisions, and a "where
-   does X live" file map. Read this first whenever the user says
-   "continue from where we left off".
+   what's done, what's next, key architectural decisions, "where does
+   X live" file map, **and a "Common pitfalls & quick fixes" section
+   that scans 90% of the desktop-app debugging traps** (Tauri 2
+   capability gates, BUILD_TAG re-embed, NSPanel mouse routing, cargo
+   incremental thrash, etc.). Read this first whenever the user says
+   "continue from where we left off" or reports the desktop app
+   misbehaving.
 2. **`MEMORY.md`** in this project's auto-memory directory (already in
    your context if it exists) — feedback / project memories. Especially
    important entries:

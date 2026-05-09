@@ -9,6 +9,17 @@
   <body>
     <canvas id="pet" width="192" height="208"></canvas>
     <div id="bubble" aria-hidden="true"></div>
+    <!--
+      Right-click menu rendered inline within the pet window. We don't
+      open a separate window: AppKit on macOS 26 reliably aborts when
+      we class-swap a freshly-built transparent WKWebView panel
+      mid-event-loop, so the safer (and cross-Space) approach is to
+      live inside the pet's already-pinned NSPanel. The window grows
+      vertically when the menu is open (see openInlineMenu in main.js).
+    -->
+    <div id="menu" hidden>
+      <ul id="menu-list"></ul>
+    </div>
     <script type="module" src="main.js"></script>
   </body>
 </html>

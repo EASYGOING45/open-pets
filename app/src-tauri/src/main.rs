@@ -13,7 +13,7 @@ use std::time::Instant;
 use tauri::{
     menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem},
     tray::{TrayIcon, TrayIconBuilder},
-    AppHandle, Builder, Emitter, LogicalPosition, Manager, PhysicalPosition, State,
+    AppHandle, Builder, Emitter, LogicalPosition, LogicalSize, Manager, PhysicalPosition, State,
     WebviewUrl, WebviewWindowBuilder, WindowEvent,
 };
 
@@ -46,6 +46,10 @@ struct AppState {
     // Set to true while shake_window is wiggling the position, so the Moved
     // handler doesn't persist the transient offsets as the user's chosen spot.
     is_shaking: Mutex<bool>,
+    // Set to true while the inline menu is expanding/collapsing the window —
+    // growing 256→500 near the screen bottom makes AppKit shift the window
+    // up, and we don't want that transient shift recorded as the user's spot.
+    is_resizing: Mutex<bool>,
 }
 
 #[derive(Serialize, Clone)]
@@ -318,6 +322,12 @@ fn on_window_moved(app: &AppHandle, pos: &PhysicalPosition<i32>) {
     // Suppress writes while the attention shake is wiggling the window —
     // those offsets aren't a user-chosen position.
     if state.is_shaking.lock().is_ok_and(|g| *g) {
+        return;
+    }
+    // Same for menu expand/collapse: AppKit may shift the window vertically
+    // when we grow it past the bottom of the screen, but the user's chosen
+    // position is what they had before they right-clicked.
+    if state.is_resizing.lock().is_ok_and(|g| *g) {
         return;
     }
 
@@ -798,14 +808,106 @@ fn shake_window(window: tauri::WebviewWindow, state: State<AppState>) -> Result<
     Ok(())
 }
 
-// Pop the same menu the tray icon shows, at the cursor location. Wired to
-// right-click on the pet body so the user doesn't have to hunt for the
-// menu-bar tray icon (which macOS frequently hides when the bar is full).
+// Right-click on the pet pops a custom HTML menu rendered in its own
+// Tauri WebviewWindow. We don't use AppKit's NSMenu (via popup_menu)
+// because NSMenu's internal popup window doesn't inherit the
+// fullScreenAuxiliary collection-behavior + screen-saver level that we
+// apply to the pet panel — so on a full-screen Space the menu would
+// pop into the regular desktop and be invisible. The HTML menu uses the
+// same pin_window_above_full_screen_apps recipe as the pet, so it shows
+// over any full-screen app exactly like the pet does.
 #[tauri::command]
-fn show_context_menu(app: AppHandle, window: tauri::WebviewWindow) -> Result<(), String> {
-    let pets = list_pets();
-    let menu = build_tray_menu(&app, &pets).map_err(|e| e.to_string())?;
-    window.popup_menu(&menu).map_err(|e| e.to_string())?;
+fn show_context_menu(app: AppHandle, x: f64, y: f64) -> Result<(), String> {
+    eprintln!("[OpenPets] show_context_menu at screen ({x}, {y})");
+    open_ctxmenu_window(&app, x, y).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn quit_app(app: AppHandle) {
+    app.exit(0);
+}
+
+// JS calls this around setSize when opening/closing the inline menu so the
+// transient position shifts AppKit may apply (when the resized window
+// overlaps the dock or the bottom of the screen) don't get persisted as
+// the user's chosen pet position.
+#[tauri::command]
+fn set_menu_resizing(state: State<AppState>, resizing: bool) {
+    if let Ok(mut g) = state.is_resizing.lock() {
+        *g = resizing;
+    }
+}
+
+#[tauri::command]
+fn show_picker_window_cmd(app: AppHandle) -> Result<(), String> {
+    show_picker_window(&app).map_err(|e| e.to_string())
+}
+
+// Called by ctxmenu.js after the menu items render so we can shrink the
+// window to fit. We start with a generous default size; this trims the
+// transparent padding so the menu shadow doesn't bleed onto adjacent
+// content.
+#[tauri::command]
+fn resize_ctxmenu(app: AppHandle, width: f64, height: f64) -> Result<(), String> {
+    let Some(w) = app.get_webview_window("ctxmenu") else {
+        return Ok(());
+    };
+    w.set_size(LogicalSize::new(width, height))
+        .map_err(|e| e.to_string())
+}
+
+fn open_ctxmenu_window(app: &AppHandle, x: f64, y: f64) -> tauri::Result<()> {
+    // Always close any existing menu window so a fresh right-click
+    // re-fetches state (active pet, sound toggle, connection state) and
+    // pops at the new cursor position.
+    if let Some(existing) = app.get_webview_window("ctxmenu") {
+        let _ = existing.close();
+    }
+
+    let window = WebviewWindowBuilder::new(
+        app,
+        "ctxmenu",
+        WebviewUrl::App("ctxmenu.html".into()),
+    )
+    .title("OpenPets Menu")
+    // Generous initial size — ctxmenu.js calls resize_ctxmenu after it
+    // renders to shrink to fit the actual content.
+    .inner_size(240.0, 360.0)
+    .resizable(false)
+    .decorations(false)
+    .transparent(true)
+    .always_on_top(true)
+    .skip_taskbar(true)
+    .shadow(false)
+    .build()?;
+
+    // Position at the cursor in *logical* (CSS) pixels, matching the
+    // event.screenX/Y coords JS hands us.
+    let _ = window.set_position(LogicalPosition::new(x, y));
+
+    // KNOWN LIMITATION: we deliberately do NOT call
+    // pin_window_above_full_screen_apps on ctxmenu. On macOS 26+,
+    // running the NSPanel class-swap on a freshly-built transparent
+    // WKWebView panel that was created mid-event-loop reliably aborts
+    // the app via NSException ("Rust cannot catch foreign exceptions").
+    // Deferring the pin (tested up to 120ms) does not help. Pet and
+    // picker survive the same recipe only because they're built during
+    // app setup, before the run loop processes user events.
+    //
+    // Trade-off: in a full-screen Space owned by another app, the pet
+    // is still visible (its panel is pinned at startup) but the right-
+    // click menu opens on the regular desktop instead of the active
+    // full-screen Space, so it appears not to show. Workaround for
+    // those users: use the menu-bar tray icon (always available) or
+    // exit the full-screen app. Tracked as a follow-up — see
+    // docs/progress.md.
+    let close_target = window.clone();
+    window.on_window_event(move |event| {
+        if let WindowEvent::Focused(false) = event {
+            let _ = close_target.close();
+        }
+    });
+
     Ok(())
 }
 
@@ -955,7 +1057,14 @@ fn set_active_pet(id: String, app: AppHandle) -> Result<Pet, String> {
     Ok(pet)
 }
 
+// Build tag — touch this string to force cargo to recompile main.rs and
+// re-embed the latest frontend assets (the tauri::generate_context! macro
+// re-evaluates per compile). Frontend-only edits don't trigger a rebuild
+// otherwise, so a stale binary serves stale HTML/JS.
+const BUILD_TAG: &str = "openpets-2026-05-09-menu-fit-and-blur-close";
+
 fn main() {
+    eprintln!("[OpenPets] build: {BUILD_TAG}");
     Builder::default()
         .manage(AppState::default())
         .setup(|app| {
@@ -1039,6 +1148,10 @@ fn main() {
             start_drag,
             shake_window,
             show_context_menu,
+            quit_app,
+            show_picker_window_cmd,
+            resize_ctxmenu,
+            set_menu_resizing,
             get_attention_sound,
             set_attention_sound,
             list_tool_connections,
