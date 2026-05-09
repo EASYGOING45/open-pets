@@ -51,6 +51,13 @@ if [[ "${1:-}" == "auto" ]]; then
   # because `python3 -` would attach the heredoc to python's stdin, leaving
   # nothing for `sys.stdin.read()` to consume. With -c, stdin stays as the
   # parent shell's stdin (the JSON pipe from the hook).
+  #
+  # WARNING — bash heredoc-in-$() trap: bash's parser scans `(` and `)` even
+  # inside the heredoc body when it sits inside a $() substitution, so a
+  # multi-line Python tuple like `x = (\n  "a",\n  "b",\n)` makes bash bail
+  # with `unexpected EOF while looking for matching ')'` even though the
+  # parens are perfectly balanced. Keep all `( … )` constructs in this
+  # heredoc on a single line. Use `[ … ]` lists for multi-element collections.
   state=$(python3 -c "$(cat <<'PY'
 import json, sys
 try:
@@ -83,7 +90,10 @@ elif ev == "PostToolUse":
 elif ev == "PreToolUse":
     print("running")
 elif ev == "Notification":
-    print("review")
+    msg = data.get("message") or ""
+    msg = msg.lower()
+    if any(w in msg for w in ["permission", "approval", "needs your", "waiting for", "approve", "allow", "confirm"]):
+        print("review")
 elif ev == "UserPromptSubmit":
     print("running")
 elif ev in ("Stop", "SubagentStop"):
@@ -94,7 +104,12 @@ else:
     print("running")
 PY
 )" 2>/dev/null || echo running)
-  state="${state:-running}"
+  # Empty output is intentional — the inline Python emits "" for events
+  # that should not change the pet state (e.g. an idle Notification ping).
+  # Don't write anything in that case; the existing state.json stands.
+  if [[ -z "$state" ]]; then
+    exit 0
+  fi
   write_state "$state" "$source_label"
   exit 0
 fi

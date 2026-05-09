@@ -400,7 +400,10 @@ const CLAUDE_CODE_HOOKS: &[(&str, &str)] = &[
     // PostToolUse uses `auto` so a failed tool (non-zero exit / is_error)
     // animates `failed` instead of staying in `running`.
     ("PostToolUse", "openpets-event auto    claude-code"),
-    ("Notification", "openpets-event review  claude-code"),
+    // Notification also goes through `auto` so the inline-Python check can
+    // distinguish "Claude needs your permission" (→ review) from idle pings
+    // and other informational notifications (→ no-op, keep current state).
+    ("Notification", "openpets-event auto    claude-code"),
     ("Stop", "openpets-event waving  claude-code"),
     ("SessionEnd", "openpets-event idle    claude-code"),
 ];
@@ -434,6 +437,13 @@ fn ensure_helper_installed() -> Result<PathBuf, String> {
     Ok(target)
 }
 
+// True iff settings.json contains *any* hook command starting with
+// "openpets-event ". We use a prefix match instead of exact-string matching
+// so that when we ship a new version that changes a hook command (e.g.
+// Notification: review → auto), returning users still register as
+// "connected" and trigger the startup auto-migration that swaps the old
+// command set for the new one. Otherwise the old `openpets-event review …`
+// rows would silently linger in settings.json forever.
 fn is_connected_to(tool: &ToolDef) -> bool {
     let Some(path) = (tool.settings_path_fn)() else {
         return false;
@@ -444,23 +454,26 @@ fn is_connected_to(tool: &ToolDef) -> bool {
     let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
         return false;
     };
-    let Some(hooks) = value.get("hooks") else {
+    let Some(hooks) = value.get("hooks").and_then(|h| h.as_object()) else {
         return false;
     };
 
-    tool.hooks.iter().any(|(event, cmd)| {
-        let Some(events) = hooks.get(event).and_then(|v| v.as_array()) else {
-            return false;
-        };
-        events.iter().any(|block| {
-            block
-                .get("hooks")
-                .and_then(|h| h.as_array())
-                .is_some_and(|inner| {
-                    inner.iter().any(|h| {
-                        h.get("command").and_then(|c| c.as_str()) == Some(*cmd)
+    hooks.values().any(|event_arr| {
+        event_arr.as_array().is_some_and(|arr| {
+            arr.iter().any(|block| {
+                block
+                    .get("hooks")
+                    .and_then(|h| h.as_array())
+                    .is_some_and(|inner| {
+                        inner.iter().any(|h| {
+                            h.get("command")
+                                .and_then(|c| c.as_str())
+                                .is_some_and(|s| {
+                                    s.trim_start().starts_with("openpets-event ")
+                                })
+                        })
                     })
-                })
+            })
         })
     })
 }
@@ -559,13 +572,23 @@ fn disconnect_tool(tool: &ToolDef) -> Result<(), String> {
             return Ok(());
         };
 
-        for (event, cmd) in tool.hooks {
-            if let Some(arr) = hooks_obj.get_mut(*event).and_then(|v| v.as_array_mut()) {
+        // Sweep every hook event (not just the ones in tool.hooks) and remove
+        // any block whose command starts with "openpets-event ". This is a
+        // prefix match instead of exact match so that when we change a hook
+        // command between versions (e.g. Notification: review → auto), the
+        // old row gets cleaned up too — otherwise users end up with both
+        // entries and the pet receives double events.
+        for (_event, value) in hooks_obj.iter_mut() {
+            if let Some(arr) = value.as_array_mut() {
                 arr.retain(|block| {
                     let inner = block.get("hooks").and_then(|h| h.as_array());
                     let has_our = inner.is_some_and(|inner_arr| {
                         inner_arr.iter().any(|h| {
-                            h.get("command").and_then(|c| c.as_str()) == Some(*cmd)
+                            h.get("command")
+                                .and_then(|c| c.as_str())
+                                .is_some_and(|s| {
+                                    s.trim_start().starts_with("openpets-event ")
+                                })
                         })
                     });
                     !has_our
@@ -1061,7 +1084,7 @@ fn set_active_pet(id: String, app: AppHandle) -> Result<Pet, String> {
 // re-embed the latest frontend assets (the tauri::generate_context! macro
 // re-evaluates per compile). Frontend-only edits don't trigger a rebuild
 // otherwise, so a stale binary serves stale HTML/JS.
-const BUILD_TAG: &str = "openpets-2026-05-09-menu-fit-and-blur-close";
+const BUILD_TAG: &str = "openpets-2026-05-09-notification-classify";
 
 fn main() {
     eprintln!("[OpenPets] build: {BUILD_TAG}");
@@ -1081,14 +1104,16 @@ fn main() {
             let pets = list_pets();
             setup_tray(app, &pets)?;
 
-            // Auto-upgrade: if the user already connected a tool in a prior
-            // version, re-run connect_tool to install any hooks we've added
-            // since (e.g. PostToolUse for failure detection). Idempotent —
-            // existing entries are skipped, missing entries are added.
+            // Auto-migrate connected users: disconnect (prefix-matches all
+            // openpets-event rows, including legacy hook commands like
+            // `openpets-event review claude-code`) and then re-connect with
+            // the current canonical hook set. Idempotent for users already
+            // on the latest version, and the path that swaps a renamed hook
+            // command for users coming from an older version.
             for tool in TOOLS {
                 if is_connected_to(tool) {
-                    if let Err(e) = connect_tool(tool) {
-                        eprintln!("[OpenPets] hook re-install for {}: {e}", tool.label);
+                    if let Err(e) = disconnect_tool(tool).and_then(|_| connect_tool(tool)) {
+                        eprintln!("[OpenPets] hook migration for {}: {e}", tool.label);
                     }
                 }
             }
