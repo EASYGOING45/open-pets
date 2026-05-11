@@ -12,7 +12,8 @@ Use this skill for deterministic Open Pets/Codex pet packaging and repair. It do
 ## Workflow
 
 1. Locate the source art and target pet folder.
-   - Source art can be an already-generated sprite sheet, usually with a flat black or transparent background.
+   - Source art is an 8×8 sprite sheet on a flat black (or transparent) background.
+   - If it has not been generated yet, see `Generation Prompts` below for the prompt-authoring workflow.
    - Keep the canonical output shape `1536x1872`, `8x9` cells, `192x208` per cell.
 2. Read `references/codex-pet-atlas.md` when you need the official row counts, row meanings, or tuning heuristics.
 3. Repack the source into a Codex atlas with `scripts/repack_pet_atlas.py`.
@@ -21,6 +22,29 @@ Use this skill for deterministic Open Pets/Codex pet packaging and repair. It do
 6. Install with `scripts/install_pet.py` when the user wants the pet usable in Codex.
 
 Do not locally draw, invent, or synthesize missing pet frames with these scripts. These tools may crop, alpha-clean, resize, mirror, center, validate, and package already-existing pet art.
+
+## Generation Prompts
+
+When the user is creating a **brand new pet** and asks for a prompt to feed to an image generator (gpt-image, GPT-4o Image, Midjourney, SDXL, etc.), produce a per-pet `docs/<pet-id>-generation-prompt.md`.
+
+**Before writing the doc:**
+
+1. Understand the character from the user's requirements — palette, anatomy, signature features, and what NOT to draw.
+2. Read `references/generation-prompt-format.md` to get the current canonical Prompt B block. (Prompt B is the global format / pose / animation contract shared across all pets — the canonical source may have been updated since the last per-pet doc was written.)
+
+Then produce the doc with this structure:
+
+1. **Top of doc — Next steps:** a short numbered checklist telling the user exactly what to do — prepare a reference image if available, copy one of the two prompts at the bottom into their image tool, save the output to `pets/<pet-id>/spritesheet-source.png`, return for repack / inspect / validate / install.
+2. **Character-specific iteration tips:** per-pet drift traps and signature features to defend (e.g., for Maodou: fight the ice-blue prior; ears must always droop, never stand upright).
+3. **Two prompts at the tail of the doc, copy-pasteable:**
+   - **Prompt A — Character + Format (recommended):** a **self-contained, character-rich** prompt that combines a full character description (palette, anatomy, signature features, negatives) with the format / pose / animation requirements. The user pastes Prompt A together with any reference image they have. Works standalone if no reference image exists.
+   - **Prompt B — Format / Pose only (Plan B):** copied verbatim from `references/generation-prompt-format.md`. The user pairs Prompt B with their own short character description when they want fine control over wording or when Prompt A drifts.
+
+**Default recommendation to the user is Prompt A.** Prompt B is the fallback — use it when the user already has a reference image and prefers to pair it with the bare format/pose prompt, when they want fine control over the character description wording, or when Prompt A drifts in unwanted ways.
+
+**Always render both prompts as fenced `text` code blocks** (```` ```text ```` … ```` ``` ````), NOT as markdown blockquotes — most viewers offer a one-click copy button on code blocks, and `**bold**` / `>` markers would otherwise end up in the pasted text and confuse the image generator. Within the code block, use ALL CAPS or sentence position for emphasis instead of markdown bold.
+
+Prompt B is identical across every pet (the format / pose contract is fixed). The per-pet doc inlines it for user convenience — users grab both prompts from a single file — but the canonical source lives in `references/generation-prompt-format.md`. When that block changes (e.g., atlas dimensions, row count), update the canonical source and re-sync every per-pet doc's Prompt B section.
 
 ## Repack
 
