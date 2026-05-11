@@ -35,7 +35,7 @@ const STATES = {
 // States where the user is being asked to do something (tool confirmation,
 // permission prompt, etc). Entering these from a non-attention state plays a
 // summon animation + window shake + optional sound.
-const ATTENTION_STATES = new Set(["review", "waiting"]);
+const ATTENTION_STATES = new Set(["review"]);
 const RESUMMON_DELAY_MS = 30_000;
 
 // Friendly label shown in the bubble for each state. `null` = no bubble.
@@ -74,6 +74,7 @@ const WINDOW_WITH_MENU = { w: 256, h: 620 };
 let state = "idle";
 let frame = 0;
 let lastFrameTime = 0;
+let lastIdleTime = 0;
 
 // When the jumping pre-roll finishes, the tick loop transitions to this
 // target instead of jumping's default `then: "idle"`. Used for the summon.
@@ -159,6 +160,7 @@ function setState(name) {
 
   // Idle variety: schedule a spontaneous animation; cancel on any transition.
   if (name === "idle") {
+    lastIdleTime = Date.now();
     scheduleIdleVariety();
   } else {
     cancelIdleVariety();
@@ -204,6 +206,14 @@ function summonAttention(targetState, { silent = false } = {}) {
 // a non-attention state; otherwise just sets the state directly.
 function transitionToExternal(name) {
   if (!STATES[name]) return;
+
+  // Suppress idle_prompt → waiting transitions that fire within 30s of the
+  // pet entering idle. Claude Code fires idle_prompt right after Stop, but
+  // the user is still reading the response — don't nag them yet.
+  if (name === "waiting" && Date.now() - lastIdleTime < 30_000) {
+    return;
+  }
+
   const enteringAttention = ATTENTION_STATES.has(name);
   const alreadyInAttention = ATTENTION_STATES.has(state);
   if (enteringAttention && !alreadyInAttention) {
