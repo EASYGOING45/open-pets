@@ -81,6 +81,53 @@ let pendingAfterIntro = null;
 let resummonTimer = null;
 let bubbleHideTimer = null;
 let attentionSoundEnabled = false;
+let idleVarietyTimer = null;
+// When the pet enters `running` via an external event, start this timer.
+// If 20s pass without any new hook event (Claude is thinking / streaming
+// text rather than executing tools), degrade to idle so the pet looks
+// relaxed instead of sprinting for minutes.
+let runningDegradeTimer = null;
+const RUNNING_DEGRADE_MS = 20_000;
+
+function scheduleIdleVariety() {
+  cancelIdleVariety();
+  if (state !== "idle") return;
+  // 15–45 seconds of pure idle before the pet gets restless.
+  const delay = 15000 + Math.random() * 30000;
+  idleVarietyTimer = setTimeout(() => {
+    idleVarietyTimer = null;
+    // Don't interrupt menu or onboarding.
+    if (state !== "idle" || menuIsOpen || bubbleEl.classList.contains("onboarding"))
+      return;
+    // Spontaneous hop — jumping is a oneshot that returns to idle.
+    setState("jumping");
+  }, delay);
+}
+
+function cancelIdleVariety() {
+  if (idleVarietyTimer) {
+    clearTimeout(idleVarietyTimer);
+    idleVarietyTimer = null;
+  }
+}
+
+function scheduleRunningDegrade() {
+  cancelRunningDegrade();
+  runningDegradeTimer = setTimeout(() => {
+    runningDegradeTimer = null;
+    if (state === "running") {
+      // Degrade to idle — Claude is thinking / streaming, not executing.
+      setState("idle");
+    }
+  }, RUNNING_DEGRADE_MS);
+}
+
+function cancelRunningDegrade() {
+  if (runningDegradeTimer) {
+    clearTimeout(runningDegradeTimer);
+    runningDegradeTimer = null;
+  }
+}
 
 function updateBubble(name) {
   const text = STATE_LABELS[name];
@@ -109,6 +156,22 @@ function setState(name) {
   frame = 0;
   lastFrameTime = performance.now();
   updateBubble(name);
+
+  // Idle variety: schedule a spontaneous animation; cancel on any transition.
+  if (name === "idle") {
+    scheduleIdleVariety();
+  } else {
+    cancelIdleVariety();
+  }
+
+  // Running degrade: if an external event set us to running, start a
+  // 20s timer. If no new event arrives before it fires, Claude is just
+  // thinking/streaming — degrade to idle so the pet looks relaxed.
+  if (name === "running") {
+    scheduleRunningDegrade();
+  } else {
+    cancelRunningDegrade();
+  }
 
   // Any state change cancels a pending re-summon — the user has progressed.
   if (resummonTimer) {
@@ -225,6 +288,63 @@ let animationStarted = false;
 // Load the new atlas into a fresh Image first; only swap `img` once it's
 // fully decoded. This avoids a flicker when the user switches pets via the
 // picker and the canvas would otherwise try to draw a half-loaded image.
+let onboardingStarted = false;
+let onboardingActive = false;
+
+async function startOnboarding() {
+  // First run only — persist across restarts so it never replays.
+  const alreadyDone = await invoke("get_onboarding_done").catch(() => false);
+  if (alreadyDone) return;
+
+  // Check whether Claude Code is already hooked up.
+  let ccConnected = false;
+  try {
+    const tools = await invoke("list_tool_connections");
+    const cc = tools.find((t) => t[0] === "claude-code");
+    ccConnected = cc ? cc[2] : false;
+  } catch (_) { /* fetch failed, assume not connected */ }
+
+  const showOnboardingBubble = (text, holdMs) =>
+    new Promise((resolve) => {
+      bubbleEl.textContent = text;
+      bubbleEl.classList.add("visible", "onboarding");
+      bubbleHideTimer = setTimeout(() => {
+        bubbleEl.classList.remove("visible", "onboarding");
+        bubbleHideTimer = null;
+        resolve();
+      }, holdMs);
+    });
+
+  onboardingActive = true;
+
+  // Step 1 — always: teach the right-click gesture.
+  await showOnboardingBubble("Right-click me for menu", 4000);
+  if (!onboardingActive) return; // cancelled by user interaction
+
+  // Step 2 — only if Claude Code isn't connected yet.
+  if (!ccConnected) {
+    await showOnboardingBubble(
+      "Connect to Claude Code — look for ☰ in your Mac menu bar",
+      5000,
+    );
+    if (!onboardingActive) return;
+  }
+
+  onboardingActive = false;
+  await invoke("set_onboarding_done", { done: true }).catch(() => {});
+}
+
+function cancelOnboarding() {
+  if (!onboardingActive) return;
+  onboardingActive = false;
+  if (bubbleHideTimer) {
+    clearTimeout(bubbleHideTimer);
+    bubbleHideTimer = null;
+  }
+  bubbleEl.classList.remove("visible", "onboarding");
+  invoke("set_onboarding_done", { done: true }).catch(() => {});
+}
+
 function loadPet(pet) {
   console.log(`OpenPets: loading ${pet.display_name} (${pet.id})`);
   const next = new Image();
@@ -235,6 +355,10 @@ function loadPet(pet) {
     if (!animationStarted) {
       animationStarted = true;
       requestAnimationFrame(tick);
+    }
+    if (!onboardingStarted) {
+      onboardingStarted = true;
+      startOnboarding();
     }
   };
   next.onerror = (e) =>
@@ -331,6 +455,11 @@ window.addEventListener("mouseup", () => {
 canvas.addEventListener("click", () => {
   // The mouseup that ended a drag also fires a click — ignore it.
   if (dragInitiated) return;
+  // Any click during onboarding dismisses it — the user saw the hint.
+  if (onboardingActive) {
+    cancelOnboarding();
+    return;
+  }
   // While the inline menu is open, clicking the pet dismisses it
   // instead of triggering a wave.
   if (menuIsOpen) {
@@ -536,6 +665,8 @@ function closeInlineMenu() {
 
 document.addEventListener("contextmenu", (e) => {
   e.preventDefault();
+  // Right-click during onboarding: dismiss the hint and show menu.
+  if (onboardingActive) cancelOnboarding();
   if (menuIsOpen) {
     closeInlineMenu();
   } else {

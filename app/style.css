@@ -73,6 +73,21 @@ body {
   animation: bubble-pulse 1.6s ease-in-out infinite;
 }
 
+/* Onboarding / guide bubble — friendly teal instead of alert red. */
+#bubble.onboarding {
+  background: rgba(40, 120, 200, 0.88);
+  max-width: 240px;
+  white-space: normal;
+  font-size: 12px;
+  padding: 6px 12px;
+  animation: onboard-glow 2s ease-in-out infinite;
+}
+
+@keyframes onboard-glow {
+  0%, 100% { box-shadow: 0 2px 8px rgba(40, 120, 200, 0.35); }
+  50% { box-shadow: 0 2px 14px rgba(40, 120, 200, 0.75); }
+}
+
 @keyframes bubble-pulse {
   0%, 100% { box-shadow: 0 2px 6px rgba(212, 64, 64, 0.35); }
   50% { box-shadow: 0 2px 12px rgba(212, 64, 64, 0.85); }

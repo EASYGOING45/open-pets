@@ -28,6 +28,8 @@ struct OpenPetsConfig {
     window_position: Option<WindowPos>,
     #[serde(default)]
     attention_sound: bool,
+    #[serde(default)]
+    onboarding_done: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Default)]
@@ -384,6 +386,15 @@ fn position_is_on_screen(window: &tauri::WebviewWindow, p: &WindowPos) -> bool {
 const OPENPETS_EVENT_SCRIPT: &str = include_str!("../../scripts/openpets-event");
 
 #[derive(Clone, Copy)]
+struct HookDef {
+    event: &'static str,
+    command: &'static str,
+    /// Claude Code hook matcher (e.g. "permission_prompt" for Notification,
+    /// "Bash" for PreToolUse). `None` means match all.
+    matcher: Option<&'static str>,
+}
+
+#[derive(Clone, Copy)]
 struct ToolDef {
     id: &'static str,
     label: &'static str,
@@ -391,21 +402,71 @@ struct ToolDef {
     /// platforms where we can't determine it, e.g. missing $HOME).
     settings_path_fn: fn() -> Option<PathBuf>,
     /// (Claude Code event name, command line) pairs to inject as hooks.
-    hooks: &'static [(&'static str, &'static str)],
+    hooks: &'static [HookDef],
 }
 
-const CLAUDE_CODE_HOOKS: &[(&str, &str)] = &[
-    ("SessionStart", "openpets-event idle    claude-code"),
-    ("UserPromptSubmit", "openpets-event running claude-code"),
-    // PostToolUse uses `auto` so a failed tool (non-zero exit / is_error)
-    // animates `failed` instead of staying in `running`.
-    ("PostToolUse", "openpets-event auto    claude-code"),
-    // Notification also goes through `auto` so the inline-Python check can
-    // distinguish "Claude needs your permission" (→ review) from idle pings
-    // and other informational notifications (→ no-op, keep current state).
-    ("Notification", "openpets-event auto    claude-code"),
-    ("Stop", "openpets-event waving  claude-code"),
-    ("SessionEnd", "openpets-event idle    claude-code"),
+const CLAUDE_CODE_HOOKS: &[HookDef] = &[
+    // --- Session lifecycle ---
+    HookDef {
+        event: "SessionStart",
+        command: "openpets-event idle    claude-code",
+        matcher: None,
+    },
+    HookDef {
+        event: "SessionEnd",
+        command: "openpets-event idle    claude-code",
+        matcher: None,
+    },
+    // --- Turn lifecycle ---
+    HookDef {
+        event: "UserPromptSubmit",
+        command: "openpets-event running claude-code",
+        matcher: None,
+    },
+    HookDef {
+        event: "Stop",
+        command: "openpets-event waving  claude-code",
+        matcher: None,
+    },
+    // --- Tool execution ---
+    // PreToolUse: Claude is about to execute a tool.
+    HookDef {
+        event: "PreToolUse",
+        command: "openpets-event running claude-code",
+        matcher: None,
+    },
+    // PostToolUse fires ONLY on success (per Claude Code docs). Failure has
+    // its own dedicated event below — no `auto` script needed.
+    HookDef {
+        event: "PostToolUse",
+        command: "openpets-event running claude-code",
+        matcher: None,
+    },
+    HookDef {
+        event: "PostToolUseFailure",
+        command: "openpets-event failed  claude-code",
+        matcher: None,
+    },
+    // --- Subagents ---
+    // Subagent finished, but the main session continues working.
+    HookDef {
+        event: "SubagentStop",
+        command: "openpets-event running claude-code",
+        matcher: None,
+    },
+    // --- Notifications (matcher pinpoints the exact type) ---
+    // Permission dialog → user must approve/deny.
+    HookDef {
+        event: "Notification",
+        command: "openpets-event review  claude-code",
+        matcher: Some("permission_prompt"),
+    },
+    // Idle prompt → Claude is waiting for the user to return.
+    HookDef {
+        event: "Notification",
+        command: "openpets-event waiting claude-code",
+        matcher: Some("idle_prompt"),
+    },
 ];
 
 fn claude_code_settings_path() -> Option<PathBuf> {
@@ -513,31 +574,42 @@ fn connect_tool(tool: &ToolDef) -> Result<(), String> {
             .as_object_mut()
             .ok_or_else(|| "settings.json `hooks` is not an object".to_string())?;
 
-        for (event, cmd) in tool.hooks {
+        for hook in tool.hooks {
             let event_arr = hooks_obj
-                .entry((*event).to_string())
+                .entry(hook.event.to_string())
                 .or_insert_with(|| serde_json::json!([]));
             let arr = event_arr.as_array_mut().ok_or_else(|| {
-                format!("settings.json hooks.{event} is not an array")
+                format!("settings.json hooks.{} is not an array", hook.event)
             })?;
 
+            // Dedup: same command AND same matcher → already installed.
             let already = arr.iter().any(|block| {
-                block
+                let cmd_match = block
                     .get("hooks")
                     .and_then(|h| h.as_array())
                     .is_some_and(|inner| {
                         inner.iter().any(|h| {
-                            h.get("command").and_then(|c| c.as_str()) == Some(*cmd)
+                            h.get("command").and_then(|c| c.as_str()) == Some(hook.command)
                         })
-                    })
+                    });
+                let matcher_match = match (hook.matcher, block.get("matcher").and_then(|m| m.as_str())) {
+                    (None, None) => true,
+                    (Some(a), Some(b)) => a == b,
+                    _ => false,
+                };
+                cmd_match && matcher_match
             });
             if already {
                 continue;
             }
 
-            arr.push(serde_json::json!({
-                "hooks": [{ "type": "command", "command": *cmd }]
-            }));
+            let mut block = serde_json::json!({
+                "hooks": [{ "type": "command", "command": hook.command }]
+            });
+            if let Some(m) = hook.matcher {
+                block["matcher"] = serde_json::json!(m);
+            }
+            arr.push(block);
         }
     }
 
@@ -940,6 +1012,20 @@ fn get_attention_sound(state: State<AppState>) -> bool {
 }
 
 #[tauri::command]
+fn get_onboarding_done(state: State<AppState>) -> bool {
+    state
+        .config
+        .lock()
+        .map(|c| c.onboarding_done)
+        .unwrap_or(false)
+}
+
+#[tauri::command]
+fn set_onboarding_done(state: State<AppState>, done: bool) {
+    update_config(&state, |cfg| cfg.onboarding_done = done);
+}
+
+#[tauri::command]
 fn set_attention_sound(app: AppHandle, enabled: bool) -> Result<(), String> {
     if let Some(state) = app.try_state::<AppState>() {
         update_config(&state, |cfg| cfg.attention_sound = enabled);
@@ -1084,7 +1170,7 @@ fn set_active_pet(id: String, app: AppHandle) -> Result<Pet, String> {
 // re-embed the latest frontend assets (the tauri::generate_context! macro
 // re-evaluates per compile). Frontend-only edits don't trigger a rebuild
 // otherwise, so a stale binary serves stale HTML/JS.
-const BUILD_TAG: &str = "openpets-2026-05-09-notification-classify";
+const BUILD_TAG: &str = "openpets-2026-05-11-state-machine-v2";
 
 fn main() {
     eprintln!("[OpenPets] build: {BUILD_TAG}");
@@ -1179,6 +1265,8 @@ fn main() {
             set_menu_resizing,
             get_attention_sound,
             set_attention_sound,
+            get_onboarding_done,
+            set_onboarding_done,
             list_tool_connections,
             set_tool_connection,
         ])

@@ -69,17 +69,34 @@ ev = data.get("hook_event_name", "") or ""
 resp = data.get("tool_response")
 
 def is_error(r):
+    if r is None:
+        return False
     if isinstance(r, dict):
+        # Explicit is_error flag from the tool contract.
         if r.get("is_error") is True:
             return True
-        if r.get("error"):
-            return True
-        rc = r.get("returnCode") or r.get("returncode") or r.get("exit_code")
-        if isinstance(rc, int) and rc != 0:
-            return True
+        # Non-empty error / stderr fields.
+        for key in ("error", "stderr", "errorMessage", "error_message"):
+            v = r.get(key)
+            if isinstance(v, str) and v.strip():
+                return True
+        # Non-zero exit code in any casing convention.
+        rc = r.get("returnCode") or r.get("returncode") or r.get("exit_code") or r.get("exitCode")
+        if rc is not None:
+            try:
+                if int(rc) != 0:
+                    return True
+            except (ValueError, TypeError):
+                pass
+        # Nested content blob (some tools wrap output).
+        content = r.get("content")
+        if isinstance(content, list):
+            for item in content:
+                if isinstance(item, dict) and is_error(item):
+                    return True
     elif isinstance(r, str):
         low = r.lower()
-        if "error" in low and "no error" not in low:
+        if "error" in low and "no error" not in low and "not an error" not in low:
             return True
     return False
 
@@ -90,14 +107,22 @@ elif ev == "PostToolUse":
 elif ev == "PreToolUse":
     print("running")
 elif ev == "Notification":
-    msg = data.get("message") or ""
-    msg = msg.lower()
-    if any(w in msg for w in ["permission", "approval", "needs your", "waiting for", "approve", "allow", "confirm"]):
+    # Direct hooks with matchers handle permission_prompt→review and
+    # idle_prompt→waiting. This fallback uses the notification_type
+    # field (the canonical discriminator per Claude Code docs) instead
+    # of guessing from message text.
+    ntype = (data.get("notification_type") or "").lower()
+    if ntype == "permission_prompt":
         print("review")
+    elif ntype == "idle_prompt":
+        print("waiting")
 elif ev == "UserPromptSubmit":
     print("running")
-elif ev in ("Stop", "SubagentStop"):
+elif ev == "Stop":
     print("waving")
+elif ev == "SubagentStop":
+    # Sub-agent finished, but the main Claude session continues working.
+    print("running")
 elif ev in ("SessionStart", "SessionEnd"):
     print("idle")
 else:
