@@ -5,23 +5,10 @@ the project is, what's open, and what we'd want to remember next time we
 sit down to keep building. Pair with `CLAUDE.md` (orientation) and the
 auto-memory feedback files (lessons).
 
-> **Last updated**: 2026-05-09 — Drag + right-click regression cluster
-> fixed in four passes:
-> 1. Swapped `data-tauri-drag-region` (which kills *all* mouse events
->    on transparent NSPanel canvas, including right-click) for a
->    movement-threshold drag in JS.
-> 2. Added `is_resizing` guard so the 256→620 menu expand doesn't
->    persist AppKit's auto-shift as the user's pet position.
-> 3. Granted three Tauri 2 capabilities the JS API needed
->    (`start-dragging`, `set-size`, `set-position`) — `core:default`
->    is read-only, every window-mutating call needs an explicit allow.
-> 4. Sized the menu container to fit (window 620px + `#menu-list`
->    `max-height` for overflow) and added `onFocusChanged` close so
->    clicks outside the WebView (which never reach `document.click`
->    on a transparent panel) actually dismiss the menu.
->
-> See the four "Architectural decisions" entries that go with these,
-> and the new "Common pitfalls" section at the bottom.
+> **Last updated**: 2026-05-11 — State machine hardened, idle_prompt
+> regression fixed, test suite added. Idle variety, onboarding, running
+> timeout degrade, and Claude Code hook matcher system all shipped.
+> Remaining "Next" items re-prioritized.
 
 ---
 
@@ -36,32 +23,29 @@ auto-memory feedback files (lessons).
 | Pet picker (1.5) | Tray menu lists every installed pet; "Choose Pet…" opens a 400×240 frosted-glass thumbnail grid | `app/picker.{html,js,css}` |
 | Phase 2.A — IDE event source | `~/.openpets/state.json` watcher on the Rust side; `openpets-event` bash helper for atomic writes; Claude Code hooks tested end-to-end | `app/scripts/openpets-event`, `watch_state_file` in `main.rs` |
 | Phase 2.B — automation | One-click "Connect to Claude Code" tray toggle (no JSON pasting); active-pet and window-position persistence in `~/.openpets/config.json` | `connect_tool` / `disconnect_tool` / `OpenPetsConfig` in `main.rs` |
-| Phase 2.C — UX polish | Attention-summon for review/waiting (jumping pre-roll + window shake + opt-in sound, silent re-summon at 30s); right-click pet → same menu as the tray icon; status bubbles with friendly labels (red pulse on attention states); smarter `openpets-event auto` mode parses Claude Code hook JSON so failed `PostToolUse` calls flip the pet to `failed`; auto-reinstall hooks on startup so already-connected users pick up new ones | `app/main.{js,css}`, `shake_window` / `show_context_menu` in `main.rs`, `app/scripts/openpets-event` |
+| Phase 2.C — UX polish (round 1) | Attention-summon for review/waiting (jumping pre-roll + window shake + opt-in sound, silent re-summon at 30s); right-click pet → same menu as the tray icon; status bubbles with friendly labels (red pulse on attention states); smarter `openpets-event auto` mode parses Claude Code hook JSON so failed `PostToolUse` calls flip the pet to `failed`; auto-reinstall hooks on startup so already-connected users pick up new ones | `app/main.{js,css}`, `shake_window` / `show_context_menu` in `main.rs`, `app/scripts/openpets-event` |
+| Phase 2.C — UX polish (round 2) | Idle-time variety (spontaneous `jumping` every 15–45s when idle); running timeout degrade (20s of `running` with no new event → idle, so the pet isn't sprinting while Claude streams text); first-run onboarding (bubble sequence teaching right-click + Connect, persists across restarts, cancellable by any click); Claude Code hooks redesigned from keyword-matching to native `matcher` system (11 direct-command hooks covering SessionStart/End, PreToolUse, PostToolUse, PostToolUseFailure, SubagentStop, Notification with `permission_prompt`/`idle_prompt` matchers); idle_prompt cooldown (suppress `waiting` transitions within 30s of entering idle to prevent false "Waiting for you" after Stop); state machine test suite (10 tests simulating all hook event sequences) | `app/main.{js,css}`, `app/src-tauri/src/main.rs`, `app/scripts/openpets-event`, `tests/test_state_machine.py` |
 
 ---
 
 ## ⏳ Next (priority order)
 
-1. **Idle-time variety** — long stretches of `idle` should occasionally
-   trigger a small jump/blink/walk so the pet feels alive instead of a
-   6-frame loop. Cheap win, JS only.
-2. **First-run onboarding** — small bubble/toast on first launch ("right
-   click me!", "I follow Claude Code"). Avoids the user not knowing the
-   tray and right-click both exist.
-3. **Codex CLI connector** — ~1 `ToolDef` entry plus the hook shape.
-   Tauri code already iterates `TOOLS` generically.
-4. **Cursor connector** — same pattern; figure out Cursor's hook surface.
-5. **Picker "Settings" sub-area** — surface Connect-toggles and the
+1. **Picker "Settings" sub-area** — surface Connect-toggles and the
    Attention Sound switch inside the existing magic-glass picker so the
    user doesn't have to hunt the tray menu. Tauri commands
    `list_tool_connections` / `set_tool_connection` /
-   `get_attention_sound` / `set_attention_sound` already exist.
-6. **Linux / Windows parity** — every macOS-specific concern (NSPanel
+   `get_attention_sound` / `set_attention_sound` already exist. Also a
+   natural place to show the current pet + quick-switch.
+2. **Codex CLI connector** — ~1 `ToolDef` entry plus the hook shape.
+   Tauri code already iterates `TOOLS` generically.
+3. **Cursor connector** — same pattern; figure out Cursor's hook surface.
+4. **Click-through on transparent pixels** — sprite-bbox hit testing so
+   the pet's empty corners don't intercept clicks. Lower priority since
+   the pet occupies most of the 256×256 window at default scale.
+5. **Linux / Windows parity** — every macOS-specific concern (NSPanel
    hack, asset protocol scope, tray icon) needs a per-platform plan.
-7. **Multi-pet on screen at once** — would require multiple windows and
+6. **Multi-pet on screen at once** — would require multiple windows and
    a different state-machine model. Phase 3.
-8. **Click-through on transparent pixels** — sprite-bbox hit testing so
-   the pet's empty corners don't intercept clicks.
 
 ---
 
@@ -167,6 +151,62 @@ leaves the pet window we close the menu. Two subtleties:
    should close it (covered by the `keydown` handler). The blur path
    is the *third* dismiss route, not the only one.
 
+### Claude Code hook design: matchers, not keyword-guessing
+
+The first version of the Notification hook scanned Claude's `message` text for
+keywords like "permission" and "confirm" to decide whether to show `review`.
+This produced false positives on informational messages ("Build confirmed",
+"Waiting for tool output").
+
+Claude Code's hook system has a native `matcher` field that filters
+Notifications by type. The canonical discriminator is `notification_type`:
+`permission_prompt` for tool-confirmation dialogs, `idle_prompt` for idle
+nudges. Each matcher gets its own hook entry pointing to a direct command
+(`openpets-event review/waiting claude-code`), so we never guess from text.
+
+The full hook set is 10 entries covering 8 Claude Code events:
+
+| Hook event | matcher | → state |
+|---|---|---|
+| SessionStart | — | idle |
+| SessionEnd | — | idle |
+| UserPromptSubmit | — | running |
+| Stop | — | waving |
+| PreToolUse | — | running |
+| PostToolUse | — | running |
+| PostToolUseFailure | — | failed |
+| SubagentStop | — | running |
+| Notification | permission_prompt | review |
+| Notification | idle_prompt | waiting |
+
+All hooks use direct commands (not `auto` mode) because Claude Code already
+routes PostToolUse vs PostToolUseFailure to separate hooks. The `openpets-event`
+`auto` mode remains useful for tools whose hook surface doesn't split
+success/failure into separate events.
+
+Hook auto-migration: on startup, `connect_tool` compares the installed hooks
+against the current `CLAUDE_CODE_HOOKS` definition. If any entry is missing or
+differs in command/matcher, it reinstalls the full set. This means users who
+connected before a hook update automatically pick up new hooks on next app
+launch.
+
+### idle_prompt cooldown: why JS-side, not hook-side
+
+Claude Code fires `idle_prompt` Notifications on its own schedule — seconds
+after a turn completes. If we map `idle_prompt → waiting` unconditionally,
+the pet shows "Waiting for you" right as the user is reading the response.
+
+We can't control when Claude Code fires idle_prompt, so the suppression must
+be JS-side. Two layers:
+
+1. **Remove "waiting" from ATTENTION_STATES** — idle_prompt no longer
+   triggers summon (shake + beep). Only `review` (permission prompts) gets
+   the full attention treatment.
+2. **30s cooldown in transitionToExternal** — if the pet entered idle less
+   than 30 seconds ago, incoming `waiting` events are silently dropped.
+   After 30s, `waiting` is allowed through (shows a gentle "Waiting for
+   you" bubble that fades after 2s, no summon/shake).
+
 ### Why file watching, not a socket
 
 `~/.openpets/state.json` is the event channel. We chose a file watcher
@@ -251,6 +291,7 @@ hold the mutex during file I/O.
 | Add a new bubble label / change wording | `STATE_LABELS` in `app/main.js`. Add the state to `PERSISTENT_BUBBLE` if it should stay until the next state change |
 | Tune the attention summon (shake amplitude, re-summon delay, sound) | `shake_window` in `main.rs` for the wiggle pattern; `RESUMMON_DELAY_MS` and `playAttentionBeep` in `app/main.js` for everything else |
 | Extend the smart helper (auto mode) | `app/scripts/openpets-event` — the inline Python `python3 -c "$(cat <<PY ... PY)"` block. Add a new `if ev == "X"` branch |
+| Test the state machine | `tests/test_state_machine.py` — simulates hook event sequences via `openpets-event` CLI and validates `~/.openpets/state.json` |
 
 ---
 
