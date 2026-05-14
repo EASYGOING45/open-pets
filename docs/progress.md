@@ -9,8 +9,13 @@ auto-memory feedback files (lessons).
 > first-reveal celebration + Release & Restart escape hatch) and Phase B
 > (per-pet stats tracking — turns, days, clicks, waves, failures,
 > attention responsiveness, time-of-day buckets, idle/active seconds)
-> shipped together per locked decision. Phase C (evolution) is the
-> next major slice once art lands. See
+> shipped together per locked decision and **visually verified** end-to-end
+> on rocom-maodou's `月夜毛豆` variant. Phase C step 1 (chain validator
+> `check_chain.py`) also landed. Two new pitfalls captured: Tauri macro
+> thrash from chrono/time crate, and `ctx.filter` silent no-op on
+> transparent NSPanel — both have memory entries and "Common pitfalls"
+> rows now. Phase C runtime (condition evaluator + animation) is the
+> next major slice once chain art lands. See
 > `docs/pet-evolution-variant-design.md` for the full design.
 
 ---
@@ -437,6 +442,47 @@ console (right-click in dev mode → Inspect Element) to see the
 error — the project ships with `withGlobalTauri: true` so the JS
 console errors are real.
 
+### "Variant filter doesn't visibly apply to the pet sprite"
+
+`ctx.filter` (Canvas2D's chained CSS filter functions) **silently
+no-ops** on this project's specific stack: transparent NSPanel +
+WKWebView + canvas with `image-rendering: pixelated`. JS runs end-to-end
+without errors, the celebration animation plays, `mark_variant_revealed`
+flips `revealed=true` — but the rendered pixels don't pick up the filter.
+
+Use `canvas.style.filter` (CSS filter on the DOM element) instead. The
+recipe → CSS string compile is identical between the two paths; only
+the application target changes.
+
+This is the same class of pitfall as `data-tauri-drag-region` on a
+transparent NSPanel — silent failures on this stack happen often
+enough that **if a JS feature involving canvas rendering "doesn't take",
+suspect the WebView/NSPanel combo before suspecting your logic**.
+
+### "cargo check / tauri dev hangs for 30+ minutes after adding chrono or time"
+
+Adding `chrono` or `time = { features = ["local-offset", "macros"] }`
+to `app/src-tauri/Cargo.toml` triggers Tauri 2's macro re-expansion
+into pathological territory: rustc on `openpets` runs at 96% CPU for
+30–50 minutes with no output. The thrash recurs even after
+`rm -rf target/debug/incremental`.
+
+For TZ-aware time math in this project, **shell out to `/bin/date`
+instead of pulling a crate**. The wrapper in
+`main.rs::date_field()` covers both BSD (macOS, `-r <epoch>`) and GNU
+(Linux, `-d @<epoch>`) date. Cost is ~1ms per call, fired only on
+state events (a few/sec at most) — easily within budget.
+
+Recovery if you've already triggered the thrash:
+
+```bash
+pkill -f rustc
+cd app/src-tauri
+cargo clean -p openpets
+# remove the chrono/time dep from Cargo.toml, then:
+cargo check          # cold compile is ~2:30 once the trigger is gone
+```
+
 ---
 
 ## 📚 Auto-memory cross-reference
@@ -455,6 +501,9 @@ and load automatically into every Claude Code session in this repo:
 | `feedback_users_wont_edit_settings_json.md` | Why every "Connect to X" path must collapse to a single click |
 | `feedback_drag_region_breaks_nspanel.md` | `data-tauri-drag-region` kills *all* canvas mouse events on transparent NSPanel — use JS threshold drag |
 | `feedback_tauri2_capabilities_default_is_readonly.md` | `core:default` does not include window-mutating calls; allow-list each one explicitly |
+| `feedback_evolution_chains_designed_cross_pet.md` | Defer per-pet `evolution.branches` data until the full pet roster exists; Phase C runtime ships before chain narrative |
+| `feedback_avoid_chrono_time_in_tauri_app.md` | Adding `time` (with local-offset) or chrono triggers 30–50 min Tauri macro thrash on `openpets`; shell out to `/bin/date` |
+| `feedback_ctx_filter_silent_noop_on_nspanel.md` | Canvas2D `ctx.filter` silently composites as identity on the transparent-NSPanel + WKWebView combo; use `canvas.style.filter` |
 
 ---
 
