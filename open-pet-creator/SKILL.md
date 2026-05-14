@@ -20,8 +20,10 @@ Use this skill for deterministic Open Pets/Codex pet packaging and repair. It do
 4. Inspect the atlas with `scripts/inspect_pet_atlas.py`; tune `--scale`, `--offset-x`, and `--offset-y` until the pet is visually balanced.
 5. Validate with `scripts/validate_pet_atlas.py`. Treat errors as blockers.
 6. Install with `scripts/install_pet.py` when the user wants the pet usable in Codex.
+7. **(Optional, Phase A+) Add variants** — declare a `variants` array in pet.json (id + weight + displayName + recipe + effects). Iterate the recipes with `scripts/preview_variants.py --sampler` to pick directions, then re-run without `--sampler` to validate the final picks against your sprite. See `pets/rocom-maodou/pet.json` for the canonical example.
+8. **(Optional, Phase C+) Add evolution** — wire `evolution.branches` blocks in pet.json per `docs/pet-evolution-variant-design.md` §2.4-§2.5. Validate with `scripts/check_chain.py <pet-id>` before publishing — a typo in `branches[].to` becomes a runtime "my pet vanished" error if uncaught.
 
-Do not locally draw, invent, or synthesize missing pet frames with these scripts. These tools may crop, alpha-clean, resize, mirror, center, validate, and package already-existing pet art.
+Do not locally draw, invent, or synthesize missing pet frames with these scripts. These tools may crop, alpha-clean, resize, mirror, center, validate, package, **recolor, or chain-validate** already-existing pet art.
 
 ## Generation Prompts
 

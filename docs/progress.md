@@ -5,10 +5,13 @@ the project is, what's open, and what we'd want to remember next time we
 sit down to keep building. Pair with `CLAUDE.md` (orientation) and the
 auto-memory feedback files (lessons).
 
-> **Last updated**: 2026-05-11 — State machine hardened, idle_prompt
-> regression fixed, test suite added. Idle variety, onboarding, running
-> timeout degrade, and Claude Code hook matcher system all shipped.
-> Remaining "Next" items re-prioritized.
+> **Last updated**: 2026-05-14 — Phase A (variant rolling + sparkle +
+> first-reveal celebration + Release & Restart escape hatch) and Phase B
+> (per-pet stats tracking — turns, days, clicks, waves, failures,
+> attention responsiveness, time-of-day buckets, idle/active seconds)
+> shipped together per locked decision. Phase C (evolution) is the
+> next major slice once art lands. See
+> `docs/pet-evolution-variant-design.md` for the full design.
 
 ---
 
@@ -25,26 +28,41 @@ auto-memory feedback files (lessons).
 | Phase 2.B — automation | One-click "Connect to Claude Code" tray toggle (no JSON pasting); active-pet and window-position persistence in `~/.openpets/config.json` | `connect_tool` / `disconnect_tool` / `OpenPetsConfig` in `main.rs` |
 | Phase 2.C — UX polish (round 1) | Attention-summon for review/waiting (jumping pre-roll + window shake + opt-in sound, silent re-summon at 30s); right-click pet → same menu as the tray icon; status bubbles with friendly labels (red pulse on attention states); smarter `openpets-event auto` mode parses Claude Code hook JSON so failed `PostToolUse` calls flip the pet to `failed`; auto-reinstall hooks on startup so already-connected users pick up new ones | `app/main.{js,css}`, `shake_window` / `show_context_menu` in `main.rs`, `app/scripts/openpets-event` |
 | Phase 2.C — UX polish (round 2) | Idle-time variety (spontaneous `jumping` every 15–45s when idle); running timeout degrade (20s of `running` with no new event → idle, so the pet isn't sprinting while Claude streams text); first-run onboarding (bubble sequence teaching right-click + Connect, persists across restarts, cancellable by any click); Claude Code hooks redesigned from keyword-matching to native `matcher` system (11 direct-command hooks covering SessionStart/End, PreToolUse, PostToolUse, PostToolUseFailure, SubagentStop, Notification with `permission_prompt`/`idle_prompt` matchers); idle_prompt cooldown (suppress `waiting` transitions within 30s of entering idle to prevent false "Waiting for you" after Stop); state machine test suite (10 tests simulating all hook event sequences) | `app/main.{js,css}`, `app/src-tauri/src/main.rs`, `app/scripts/openpets-event`, `tests/test_state_machine.py` |
+| Phase A — Variant system | `preview_variants.py` (Skill, sampler + declared modes, PIL implementation matching W3C Filter Effects 1.0 matrices); pet.json `variants` schema with `id` + `weight` + `displayName.{zh,en}` + structured `recipe` + `effects[]`; weighted random roll on first activation, persisted to `~/.openpets/config.json::pet_state` with `revealed` flag so celebration survives app kill; JS variant load + `ctx.filter` compile (recipe → CSS chain in deterministic order); sparkle DOM layer (separate from canvas to avoid filter-tinting); first-reveal celebration in 3 tiers (silent/bubble/burst+bubble+sound); right-click menu suffix + picker tile ★ badge; two-click "Release {pet}…" tray action that clears state & re-rolls; `rocom-maodou` PoC with `蔷薇毛豆` (4%) and `月夜毛豆` (1%, sparkle); CSS-filter-matrix Python tests (10) | `open-pet-creator/scripts/preview_variants.py`, `pets/rocom-maodou/{pet.json,variants-preview.png}`, `app/{index.html,main.js,style.css,picker.js,picker.css}`, `app/src-tauri/{Cargo.toml,src/main.rs}`, `tests/test_variant_recipe.py` |
+| Phase B — Stats tracking | Per-pet usage counters (turns/days_active/clicks/waves/failures/attention_seen/attention_responded/turn_buckets/idle_seconds/active_seconds), incremented on the existing state-machine hooks (no new instrumentation); time-of-day + weekday classification via `time` crate; click batching (JS holds count, flushes every 30s + on blur/visibilitychange); attention-responsiveness detection (JS detects user-dismissed-attention-within-30s and IPCs); schema is forward-compatible — Phase C evolution conditions read these straight | same as Phase A + `tests/test_pet_stats_schema.py` |
 
 ---
 
 ## ⏳ Next (priority order)
 
-1. **Picker "Settings" sub-area** — surface Connect-toggles and the
+1. **Phase C runtime — evolution engine without chain data** — per the
+   locked decision (`feedback_evolution_chains_designed_cross_pet.md`),
+   we ship the *machinery* before the chain narrative. That means:
+   `open-pet-creator/scripts/check_chain.py` validator, Rust condition
+   evaluator (the 11-type DSL from §2.4 of
+   `docs/pet-evolution-variant-design.md`), idle-queued evolution check
+   (state→idle, SessionEnd, startup), 6-phase JS animation sequencer,
+   `commit_evolution`/`get_pending_evolution` IPC, progress menu line.
+   Stub chains during dev; real chains land later as a data-only PR
+   once the cross-pet roster design exists.
+2. **Picker "Settings" sub-area** — surface Connect-toggles and the
    Attention Sound switch inside the existing magic-glass picker so the
    user doesn't have to hunt the tray menu. Tauri commands
    `list_tool_connections` / `set_tool_connection` /
    `get_attention_sound` / `set_attention_sound` already exist. Also a
-   natural place to show the current pet + quick-switch.
-2. **Codex CLI connector** — ~1 `ToolDef` entry plus the hook shape.
+   natural place to show the current pet + quick-switch + variant info.
+3. **Petdex (Phase D)** — collection viewer with chain diagrams,
+   variant grid, secret-branch hints. Becomes meaningful once Phase C
+   chains exist.
+4. **Codex CLI connector** — ~1 `ToolDef` entry plus the hook shape.
    Tauri code already iterates `TOOLS` generically.
-3. **Cursor connector** — same pattern; figure out Cursor's hook surface.
-4. **Click-through on transparent pixels** — sprite-bbox hit testing so
+5. **Cursor connector** — same pattern; figure out Cursor's hook surface.
+6. **Click-through on transparent pixels** — sprite-bbox hit testing so
    the pet's empty corners don't intercept clicks. Lower priority since
    the pet occupies most of the 256×256 window at default scale.
-5. **Linux / Windows parity** — every macOS-specific concern (NSPanel
+7. **Linux / Windows parity** — every macOS-specific concern (NSPanel
    hack, asset protocol scope, tray icon) needs a per-platform plan.
-6. **Multi-pet on screen at once** — would require multiple windows and
+8. **Multi-pet on screen at once** — would require multiple windows and
    a different state-machine model. Phase 3.
 
 ---

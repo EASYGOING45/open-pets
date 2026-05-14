@@ -1,4 +1,4 @@
-# OpenPets desktop renderer (Phase 1)
+# OpenPets desktop renderer (Phase 1 + variant/stats Phase A+B)
 
 A lightweight Tauri 2 desktop app that animates any Codex-format pet atlas
 on your screen — independent of Codex CLI.
@@ -29,6 +29,17 @@ on your screen — independent of Codex CLI.
   lets Claude Code / Codex / Cursor / any shell-driveable tool drive the
   pet's animation in real time (see "Drive the pet from your AI agent"
   below)
+- **Variant rolls (Phase A)** — the first time you activate a pet, the
+  app rolls a random variant per the pet's declared `variants` block in
+  pet.json (defaults: 95% normal / 4% rare-color / 1% shiny ★). The roll
+  is permanent for that pet identity. Shiny variants ambient-sparkle
+  while idle. Don't like what you rolled? Tray menu → "Release {pet}…"
+  (two-click confirm) clears the roll so the next activation re-rolls.
+- **Usage tracking (Phase B)** — every state event bumps per-pet
+  counters in `~/.openpets/config.json::pet_stats`: turns, days_active,
+  click rate, time-of-day buckets, attention responsiveness. The data
+  persists across restarts; Phase C (evolution) will read it to decide
+  branching forms.
 - Tray icon menu → `Quit`
 
 ## Roadmap (Phase 2)

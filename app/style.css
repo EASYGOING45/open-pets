@@ -93,6 +93,55 @@ body {
   50% { box-shadow: 0 2px 12px rgba(212, 64, 64, 0.85); }
 }
 
+/* Reveal-bubble — used for the variant first-reveal celebration. Sits
+ * a touch larger than the default bubble with a warm glow.
+ */
+#bubble.reveal {
+  background: rgba(255, 215, 100, 0.94);
+  color: #2a1d00;
+  font-size: 12px;
+  padding: 6px 14px;
+  animation: reveal-glow 1.6s ease-in-out infinite;
+}
+
+@keyframes reveal-glow {
+  0%, 100% { box-shadow: 0 2px 8px rgba(255, 215, 100, 0.4); }
+  50% { box-shadow: 0 2px 16px rgba(255, 215, 100, 0.85); }
+}
+
+/* Sparkle particles — DOM elements positioned absolutely within
+ * #sparkle-layer. Sit ABOVE the pet canvas and are not affected by
+ * ctx.filter (which would tint them with the variant's recoloring).
+ */
+#sparkle-layer {
+  position: absolute;
+  top: 24px;
+  left: 50%;
+  width: 192px;
+  height: 208px;
+  transform: translateX(-50%);
+  pointer-events: none;
+  z-index: 4;
+}
+
+.sparkle {
+  position: absolute;
+  width: 10px;
+  height: 10px;
+  margin-left: -5px;
+  margin-top: -5px;
+  background: radial-gradient(circle, #ffffff 0%, rgba(255, 245, 200, 0.6) 50%, transparent 100%);
+  border-radius: 50%;
+  pointer-events: none;
+  animation: sparkle 1.2s ease-out forwards;
+}
+
+@keyframes sparkle {
+  0%   { transform: scale(0); opacity: 0; }
+  30%  { transform: scale(1); opacity: 1; }
+  100% { transform: scale(0.4) translateY(-12px); opacity: 0; }
+}
+
 /*
  * Inline menu — positioned below the pet at a fixed offset. Hidden by
  * default. JS resizes the window from 256x256 → 256x500 before showing

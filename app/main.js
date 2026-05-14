@@ -83,6 +83,15 @@ let resummonTimer = null;
 let bubbleHideTimer = null;
 let attentionSoundEnabled = false;
 let idleVarietyTimer = null;
+// Phase B: stamp when the pet enters an attention state so setState can
+// detect "user responded within 30s" → bumps attention_responded counter.
+let attentionEnteredAt = 0;
+// Phase B: batched click counter. JS holds the count locally and flushes
+// to Rust every CLICK_FLUSH_MS (or on blur / visibility change), so we
+// don't IPC per-click.
+let pendingClicks = 0;
+const CLICK_FLUSH_MS = 30_000;
+let clickFlushTimer = null;
 // When the pet enters `running` via an external event, start this timer.
 // If 20s pass without any new hook event (Claude is thinking / streaming
 // text rather than executing tools), degrade to idle so the pet looks
@@ -153,6 +162,20 @@ function updateBubble(name) {
 
 function setState(name) {
   if (!STATES[name]) return;
+
+  // Phase B: attention-responsiveness — if the user dismissed an attention
+  // state (review/waiting) within 30s by transitioning out of it, count it
+  // as "responded". The transition itself is the user's response.
+  if (
+    ATTENTION_STATES.has(state) &&
+    !ATTENTION_STATES.has(name) &&
+    attentionEnteredAt &&
+    Date.now() - attentionEnteredAt <= 30_000 &&
+    currentPetId
+  ) {
+    invoke("record_attention_responded", { petId: currentPetId }).catch(() => {});
+  }
+
   state = name;
   frame = 0;
   lastFrameTime = performance.now();
@@ -164,6 +187,11 @@ function setState(name) {
     scheduleIdleVariety();
   } else {
     cancelIdleVariety();
+  }
+
+  // Track when an attention state began so we can compute responsiveness.
+  if (ATTENTION_STATES.has(name)) {
+    attentionEnteredAt = Date.now();
   }
 
   // Running degrade: if an external event set us to running, start a
@@ -248,6 +276,159 @@ function playAttentionBeep() {
     console.warn("attention beep failed:", e);
   }
 }
+
+// --- Variant system (Phase A) -------------------------------------------
+//
+// Compiles a recipe object (from pet.json, mirrored through Rust) to the
+// same CSS filter chain string the runtime canvas uses. The compile order
+// matches the spec in docs/pet-evolution-variant-design.md §1.3 AND the
+// Python preview tool — author-time preview equals runtime look.
+//
+// ctx.filter is applied once per pet load; it persists across draw calls
+// so we don't pay per-frame cost. clearRect is unaffected by filter, so
+// transparent regions stay transparent.
+const RECIPE_KEY_TO_CSS = [
+  ["hue_rotate", (v) => `hue-rotate(${v}deg)`],
+  ["saturate", (v) => `saturate(${v})`],
+  ["brightness", (v) => `brightness(${v})`],
+  ["contrast", (v) => `contrast(${v})`],
+  ["grayscale", (v) => `grayscale(${v})`],
+  ["sepia", (v) => `sepia(${v})`],
+];
+
+function compileRecipe(recipe) {
+  if (!recipe || typeof recipe !== "object") return "none";
+  const parts = [];
+  for (const [key, fmt] of RECIPE_KEY_TO_CSS) {
+    if (key in recipe) parts.push(fmt(recipe[key]));
+  }
+  return parts.length === 0 ? "none" : parts.join(" ");
+}
+
+let activeVariant = null; // PetVariantInfo from Rust (null = unrolled / no variants)
+
+function applyVariantFilter() {
+  ctx.filter = activeVariant ? compileRecipe(activeVariant.recipe) : "none";
+}
+
+function variantHasSparkle() {
+  return !!(activeVariant && activeVariant.effects?.includes("sparkle"));
+}
+
+// --- Sparkle layer (effects for variants whose `effects` includes
+// "sparkle"). Renders in a separate DOM div, NOT on the pet canvas, to
+// avoid inheriting ctx.filter (the recoloring would tint the sparkles).
+const sparkleLayerEl = document.getElementById("sparkle-layer");
+let sparkleAmbientTimer = null;
+let lastSparkleBurstAt = 0;
+const SPARKLE_BURST_COOLDOWN_MS = 5000;
+
+function spawnSparkle(x, y) {
+  if (!sparkleLayerEl) return;
+  const el = document.createElement("div");
+  el.className = "sparkle";
+  el.style.left = `${x}px`;
+  el.style.top = `${y}px`;
+  sparkleLayerEl.appendChild(el);
+  el.addEventListener("animationend", () => el.remove(), { once: true });
+}
+
+function spawnSparkleBurst(count, centerX, centerY, radius) {
+  const now = Date.now();
+  if (now - lastSparkleBurstAt < SPARKLE_BURST_COOLDOWN_MS) return;
+  lastSparkleBurstAt = now;
+  for (let i = 0; i < count; i++) {
+    const angle = (i / count) * Math.PI * 2;
+    const r = radius * (0.7 + Math.random() * 0.4);
+    spawnSparkle(centerX + Math.cos(angle) * r, centerY + Math.sin(angle) * r);
+  }
+}
+
+function spawnSparkleAmbient() {
+  // Random 3-particle pop within the pet bbox-ish area.
+  const cx = CELL_W / 2;
+  const cy = CELL_H / 2;
+  for (let i = 0; i < 3; i++) {
+    const x = cx + (Math.random() - 0.5) * 130;
+    const y = cy + (Math.random() - 0.5) * 130;
+    spawnSparkle(x, y);
+  }
+}
+
+function scheduleSparkleAmbient() {
+  cancelSparkleAmbient();
+  if (!variantHasSparkle()) return;
+  const delay = 8000 + Math.random() * 12000; // 8–20s
+  sparkleAmbientTimer = setTimeout(() => {
+    sparkleAmbientTimer = null;
+    if (state === "idle" && variantHasSparkle() && !menuIsOpen) {
+      spawnSparkleAmbient();
+    }
+    scheduleSparkleAmbient();
+  }, delay);
+}
+
+function cancelSparkleAmbient() {
+  if (sparkleAmbientTimer) {
+    clearTimeout(sparkleAmbientTimer);
+    sparkleAmbientTimer = null;
+  }
+}
+
+// --- First-reveal celebration -------------------------------------------
+//
+// Played the first time a pet is activated and JS sees revealed=false.
+// Three tiers from §1.6 of the design doc:
+//   normal  → silent, just appears
+//   rare    → bubble ({displayName}) for 3s
+//   shiny   → 12-particle ring + bubble ({displayName} + weight%) for 4s
+//             + optional attention sound
+async function playFirstReveal() {
+  if (!activeVariant || activeVariant.revealed) return;
+
+  // Wait for onboarding to clear so we don't stack bubbles.
+  if (onboardingActive) {
+    await new Promise((resolve) => {
+      const tick = () => (onboardingActive ? setTimeout(tick, 200) : resolve());
+      tick();
+    });
+  }
+
+  const isShiny = variantHasSparkle();
+  const isRecolored = !!activeVariant.recipe;
+  const isNormal = !isShiny && !isRecolored;
+
+  // Wait 200ms after pet appears so the user registers the sprite first.
+  await new Promise((r) => setTimeout(r, 200));
+
+  if (isShiny) {
+    spawnSparkleBurst(12, CELL_W / 2, CELL_H / 2, 70);
+    if (attentionSoundEnabled) playAttentionBeep();
+  }
+
+  if (!isNormal) {
+    const pct = (activeVariant.weight_pct * 100).toFixed(
+      activeVariant.weight_pct < 0.05 ? 1 : 0,
+    );
+    const label = isShiny
+      ? `★ ${activeVariant.display_name} (${pct}%)`
+      : activeVariant.display_name;
+    bubbleEl.textContent = label;
+    bubbleEl.classList.add("visible", "reveal");
+    const holdMs = isShiny ? 4000 : 3000;
+    setTimeout(() => {
+      bubbleEl.classList.remove("visible", "reveal");
+    }, holdMs);
+  }
+
+  // Persist `revealed=true` so this only plays once.
+  if (currentPetId) {
+    await invoke("mark_variant_revealed", { petId: currentPetId }).catch(() => {});
+  }
+  activeVariant.revealed = true;
+}
+
+let currentPetId = null;
 
 function draw() {
   if (!img.complete || img.naturalWidth === 0) return;
@@ -355,11 +536,25 @@ function cancelOnboarding() {
   invoke("set_onboarding_done", { done: true }).catch(() => {});
 }
 
-function loadPet(pet) {
+async function loadPet(pet) {
   console.log(`OpenPets: loading ${pet.display_name} (${pet.id})`);
+  currentPetId = pet.id;
+
+  // Fetch the variant in parallel with the image decode so we can apply
+  // ctx.filter the moment the spritesheet is ready (no flicker between
+  // "first frame drawn" and "variant applied").
+  const variantPromise = invoke("get_pet_variant", { petId: pet.id }).catch(
+    (e) => {
+      console.warn(`OpenPets: get_pet_variant failed for ${pet.id}:`, e);
+      return null;
+    },
+  );
+
   const next = new Image();
-  next.onload = () => {
+  next.onload = async () => {
     img = next;
+    activeVariant = await variantPromise;
+    applyVariantFilter();
     setState("idle");
     draw();
     if (!animationStarted) {
@@ -370,6 +565,14 @@ function loadPet(pet) {
       onboardingStarted = true;
       startOnboarding();
     }
+    // Variant celebration (only if this pet has a non-normal variant
+    // that hasn't been revealed yet). Sparkle ambient (re)scheduled
+    // regardless — only does anything for sparkle-effect variants.
+    cancelSparkleAmbient();
+    scheduleSparkleAmbient();
+    playFirstReveal().catch((e) =>
+      console.warn("variant celebration failed:", e),
+    );
   };
   next.onerror = (e) =>
     console.error(`OpenPets: failed to load atlas for ${pet.id}`, e);
@@ -397,6 +600,9 @@ async function init() {
   });
 
   attentionSoundEnabled = await invoke("get_attention_sound").catch(() => false);
+
+  // Phase B: start the click-flush timer once subscriptions are wired up.
+  startClickFlushTimer();
 
   const pets = await invoke("list_pets");
   if (pets.length === 0) {
@@ -477,6 +683,38 @@ canvas.addEventListener("click", () => {
     return;
   }
   setState("waving");
+  // Phase B: count the click locally; flushed to Rust every 30s or on blur.
+  pendingClicks++;
+  // Sparkle pop on click for shiny variants — clicking a shiny pet
+  // should feel rewarding. Throttled by SPARKLE_BURST_COOLDOWN_MS.
+  if (variantHasSparkle()) {
+    spawnSparkle(CELL_W / 2 + (Math.random() - 0.5) * 60, CELL_H / 2 + (Math.random() - 0.5) * 60);
+  }
+});
+
+// Flush pending click count to Rust. Called on the periodic timer, on
+// window blur, on visibilitychange (tab hidden), and on beforeunload —
+// each path lets us survive a quit without losing more than ~30s of clicks.
+function flushPendingClicks() {
+  if (pendingClicks === 0 || !currentPetId) return;
+  const count = pendingClicks;
+  pendingClicks = 0;
+  invoke("record_clicks", { petId: currentPetId, count }).catch((e) => {
+    // On failure put them back so the next flush retries.
+    pendingClicks += count;
+    console.warn("record_clicks failed:", e);
+  });
+}
+
+function startClickFlushTimer() {
+  if (clickFlushTimer) return;
+  clickFlushTimer = setInterval(flushPendingClicks, CLICK_FLUSH_MS);
+}
+
+window.addEventListener("blur", flushPendingClicks);
+window.addEventListener("beforeunload", flushPendingClicks);
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "hidden") flushPendingClicks();
 });
 
 // ---------------------------------------------------------------------
@@ -541,6 +779,17 @@ function makeSectionLabel(text) {
   return li;
 }
 
+// Two-stage release-pet menu state. Click 1 arms; click 2 (within 5s) commits.
+let releaseArmedFor = null;
+let releaseArmedTimer = null;
+function disarmRelease() {
+  releaseArmedFor = null;
+  if (releaseArmedTimer) {
+    clearTimeout(releaseArmedTimer);
+    releaseArmedTimer = null;
+  }
+}
+
 async function buildMenuContent() {
   menuListEl.innerHTML = "";
 
@@ -548,6 +797,7 @@ async function buildMenuContent() {
   let persisted = null;
   let tools = [];
   let soundOn = false;
+  let activeVariantInfo = null;
   try {
     [pets, persisted, tools, soundOn] = await Promise.all([
       invoke("list_pets"),
@@ -555,6 +805,11 @@ async function buildMenuContent() {
       invoke("list_tool_connections"),
       invoke("get_attention_sound"),
     ]);
+    if (persisted?.id) {
+      activeVariantInfo = await invoke("get_pet_variant", {
+        petId: persisted.id,
+      }).catch(() => null);
+    }
   } catch (e) {
     console.error("buildMenuContent fetch failed:", e);
   }
@@ -563,17 +818,61 @@ async function buildMenuContent() {
   if (pets.length) {
     menuListEl.appendChild(makeSectionLabel("Pet"));
     for (const pet of pets) {
+      // Suffix the active pet's row with its non-normal variant name so
+      // the user can re-check what they rolled at any time.
+      const isActive = pet.id === activeId;
+      const showVariant =
+        isActive &&
+        activeVariantInfo &&
+        activeVariantInfo.variant_id !== "normal" &&
+        activeVariantInfo.recipe;
+      const label = showVariant
+        ? `${pet.display_name}  (${activeVariantInfo.display_name})`
+        : pet.display_name;
       menuListEl.appendChild(
         makeMenuItem(
-          pet.display_name,
+          label,
           () => invoke("set_active_pet", { id: pet.id }),
-          { checked: pet.id === activeId },
+          { checked: isActive },
         ),
       );
     }
     menuListEl.appendChild(
       makeMenuItem("Choose Pet…", () => invoke("show_picker_window_cmd")),
     );
+
+    // Release & Restart: two-stage confirm. First click arms (red label
+    // changes to "Click again to confirm…"); second click within 5s
+    // calls release_pet. Closing the menu disarms.
+    if (activeId) {
+      const armed = releaseArmedFor === activeId;
+      const releaseLabel = armed
+        ? `Click again to confirm release of ${persisted.display_name}`
+        : `Release ${persisted.display_name}…`;
+      menuListEl.appendChild(
+        makeMenuItem(
+          releaseLabel,
+          () => {
+            if (armed) {
+              disarmRelease();
+              invoke("release_pet", { petId: activeId }).catch((e) =>
+                console.error("release_pet failed:", e),
+              );
+              closeInlineMenu();
+            } else {
+              releaseArmedFor = activeId;
+              releaseArmedTimer = setTimeout(() => {
+                disarmRelease();
+                if (menuIsOpen) buildMenuContent();
+              }, 5000);
+              buildMenuContent(); // re-render with armed state
+            }
+          },
+          { danger: true },
+        ),
+      );
+    }
+
     menuListEl.appendChild(makeSeparator());
   }
 
@@ -647,6 +946,8 @@ async function openInlineMenu() {
 
 function closeInlineMenu() {
   if (!menuIsOpen) return;
+  // Disarm any pending release-pet confirmation when the menu closes.
+  disarmRelease();
   menuIsOpen = false;
   menuEl.classList.remove("open");
   // Wait for the fade-out before hiding the element and shrinking the

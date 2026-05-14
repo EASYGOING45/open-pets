@@ -8,6 +8,12 @@
   </head>
   <body>
     <canvas id="pet" width="192" height="208"></canvas>
+    <!--
+      Sparkle particles for shiny variants render here, NOT on the pet
+      canvas. ctx.filter applied to the canvas would tint the sparkles
+      the wrong color; this layer sits above the canvas and is unaffected.
+    -->
+    <div id="sparkle-layer" aria-hidden="true"></div>
     <div id="bubble" aria-hidden="true"></div>
     <!--
       Right-click menu rendered inline within the pet window. We don't

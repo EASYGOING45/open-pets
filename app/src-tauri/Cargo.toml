@@ -13,6 +13,12 @@ tauri = { version = "2", features = ["macos-private-api", "protocol-asset", "tra
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 notify = "6"
+rand = "0.8"
+# Phase B (stats tracking) needs local-time hour-of-day classification.
+# We use libc::localtime_r directly via the platform's existing libc binding
+# (already in the dependency tree via tauri's transitive deps) to avoid
+# adding the `time` crate, which significantly slowed Tauri macro
+# expansion on this project. The wrapper lives in main.rs.
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc = "0.2"

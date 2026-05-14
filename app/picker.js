@@ -14,12 +14,16 @@ const ATLAS_BG_H = 624; // 1872 * (64 / 192)
 
 const grid = document.getElementById("pet-grid");
 
-function buildCard(pet, isActive) {
+function buildCard(pet, isActive, variantInfo) {
   const card = document.createElement("button");
   card.type = "button";
   card.className = "pet-card" + (isActive ? " is-active" : "");
   card.dataset.petId = pet.id;
-  card.title = pet.description || pet.display_name;
+  const variantSuffix =
+    variantInfo && variantInfo.variant_id !== "normal" && variantInfo.recipe
+      ? ` — ${variantInfo.display_name}`
+      : "";
+  card.title = (pet.description || pet.display_name) + variantSuffix;
 
   const thumb = document.createElement("div");
   thumb.className = "pet-thumb";
@@ -27,6 +31,15 @@ function buildCard(pet, isActive) {
   thumb.style.backgroundImage = `url('${url}')`;
   thumb.style.backgroundPosition = "0 0";
   thumb.style.backgroundSize = `${ATLAS_BG_W}px ${ATLAS_BG_H}px`;
+
+  // Sparkle ★ badge for pets whose user-rolled variant has the sparkle
+  // effect. Indicates "you got something rare here".
+  if (variantInfo && variantInfo.effects?.includes("sparkle")) {
+    const badge = document.createElement("div");
+    badge.className = "pet-badge-sparkle";
+    badge.textContent = "★";
+    thumb.appendChild(badge);
+  }
 
   const name = document.createElement("div");
   name.className = "pet-name";
@@ -69,9 +82,16 @@ async function init() {
     return;
   }
 
-  for (const pet of pets) {
-    grid.appendChild(buildCard(pet, pet.id === activeId));
-  }
+  // Fetch variant info for every pet (parallel) so we can render badges.
+  const variants = await Promise.all(
+    pets.map((pet) =>
+      invoke("get_pet_variant", { petId: pet.id }).catch(() => null),
+    ),
+  );
+
+  pets.forEach((pet, i) => {
+    grid.appendChild(buildCard(pet, pet.id === activeId, variants[i]));
+  });
 }
 
 document.addEventListener("keydown", (e) => {

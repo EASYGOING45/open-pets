@@ -4,12 +4,14 @@
 #![allow(unexpected_cfgs)]
 
 use notify::{Config as NotifyConfig, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+use rand::Rng;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::sync::Mutex;
-use std::time::Instant;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tauri::{
     menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem},
     tray::{TrayIcon, TrayIconBuilder},
@@ -30,12 +32,127 @@ struct OpenPetsConfig {
     attention_sound: bool,
     #[serde(default)]
     onboarding_done: bool,
+    // Per-pet variant roll state. Populated lazily on first activation
+    // of each pet (see roll_pet_variant_if_needed). Keyed by pet id.
+    #[serde(default)]
+    pet_state: HashMap<String, PetRollState>,
+    // Per-pet usage counters (Phase B). Updated on every state-machine
+    // event so Phase C evolution can evaluate condition expressions
+    // (turns / days / time-of-day buckets / etc.) without retroactive
+    // backfill. See docs/pet-evolution-variant-design.md §3 for the
+    // schema's design rationale.
+    #[serde(default)]
+    pet_stats: HashMap<String, PetStats>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Default)]
 struct WindowPos {
     x: f64,
     y: f64,
+}
+
+// Persisted variant roll for a single pet. The roll is permanent for the
+// lifetime of this pet identity — until the user explicitly Releases the
+// pet, which clears this entry and lets the next activation re-roll.
+#[derive(Serialize, Deserialize, Clone)]
+struct PetRollState {
+    variant_id: String,
+    // Epoch milliseconds of the roll. Stored as integer to keep deps
+    // light; format on the way out (e.g., for Petdex display) when needed.
+    rolled_at_ms: u64,
+    // False until JS has played the first-reveal celebration. Lets the
+    // moment survive an app kill between roll and reveal.
+    #[serde(default)]
+    revealed: bool,
+    // Future Phase C fields — pre-allocated to keep schema migrations
+    // minimal once evolution lands.
+    #[serde(default)]
+    evolved_from: Option<String>,
+    #[serde(default)]
+    evolved_at_ms: Option<u64>,
+}
+
+// Variant info handed to the JS layer on pet load. Mirrors the pet.json
+// schema's variants[] entry plus the resolved roll bookkeeping.
+#[derive(Serialize, Clone)]
+struct PetVariantInfo {
+    variant_id: String,
+    display_name: String,
+    // Pass-through of the recipe object from pet.json (or null for normal).
+    // JS compiles this to a CSS filter string at draw time.
+    recipe: Option<serde_json::Value>,
+    weight_pct: f32,
+    effects: Vec<String>,
+    revealed: bool,
+}
+
+// Per-pet usage counters. Schema documented in
+// docs/pet-evolution-variant-design.md §3.1. Phase B writes them; Phase C
+// evolution conditions read them.
+#[derive(Serialize, Deserialize, Clone, Default)]
+struct PetStats {
+    // Lifecycle timestamps (epoch ms). first_seen is set once on initial
+    // activation; last_active_ms updates on every state change.
+    #[serde(default)]
+    first_seen_ms: u64,
+    #[serde(default)]
+    last_active_ms: u64,
+    // Distinct local-time YYYY-MM-DD seen for this pet. Each entry in the
+    // bucket increments at most once per day.
+    #[serde(default)]
+    days_active: u32,
+    // Most recent local-day key (YYYYMMDD as int) — sentinel for the
+    // days_active bump check. Stored separately to avoid re-comparing
+    // strings on the hot path.
+    #[serde(default)]
+    last_local_day_key: u32,
+
+    // Counters
+    #[serde(default)]
+    total_turns: u64,
+    #[serde(default)]
+    total_clicks: u64,
+    #[serde(default)]
+    total_waves: u64,
+    #[serde(default)]
+    failures_seen: u64,
+    #[serde(default)]
+    attention_seen: u64,
+    #[serde(default)]
+    attention_responded: u64,
+
+    // Per-bucket turn histogram (for time_of_day / weekday conditions).
+    #[serde(default)]
+    turn_buckets: TurnBuckets,
+
+    // Time accounting (sampled by the Rust tick loop every ~5s).
+    #[serde(default)]
+    idle_seconds: u64,
+    #[serde(default)]
+    active_seconds: u64,
+
+    // Phase C (evolution) bookkeeping — pre-allocated so the schema
+    // doesn't need a second migration when Phase C lands.
+    #[serde(default)]
+    previous_form: Option<String>,
+    #[serde(default)]
+    pending_evolution_branch: Option<u32>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Default)]
+struct TurnBuckets {
+    #[serde(default)]
+    morning: u64,
+    #[serde(default)]
+    afternoon: u64,
+    #[serde(default)]
+    evening: u64,
+    #[serde(default)]
+    night: u64,
+    #[serde(default)]
+    weekday: u64,
+    #[serde(default)]
+    weekend: u64,
 }
 
 #[derive(Default)]
@@ -52,6 +169,10 @@ struct AppState {
     // growing 256→500 near the screen bottom makes AppKit shift the window
     // up, and we don't want that transient shift recorded as the user's spot.
     is_resizing: Mutex<bool>,
+    // Last external state name we saw via state.json, so Phase B counters
+    // can dedupe (e.g., total_turns shouldn't double-bump if the watcher
+    // fires twice for the same atomic-mv write).
+    last_external_state: Mutex<Option<String>>,
 }
 
 #[derive(Serialize, Clone)]
@@ -1102,6 +1223,24 @@ fn handle_state_file_event(app: &AppHandle, path: &Path) {
         .and_then(|v| v.as_str())
         .unwrap_or("unknown");
     eprintln!("[OpenPets] external state event: {state_name} (source={source})");
+
+    // Phase B counter bump for the active pet — done before the JS emit so a
+    // crash in the JS path doesn't lose the counter increment.
+    if let Some(state) = app.try_state::<AppState>() {
+        let active_pet_id = state.config.lock().ok().and_then(|c| c.active_pet_id.clone());
+        let prev = state
+            .last_external_state
+            .lock()
+            .ok()
+            .and_then(|m| m.clone());
+        if let Some(pet_id) = active_pet_id {
+            record_state_event(&state, &pet_id, state_name, prev.as_deref());
+        }
+        if let Ok(mut last) = state.last_external_state.lock() {
+            *last = Some(state_name.to_string());
+        }
+    }
+
     if let Err(e) = app.emit("pet-state-changed", state_name) {
         eprintln!("[OpenPets] emit pet-state-changed failed: {e}");
     }
@@ -1160,17 +1299,361 @@ fn set_active_pet(id: String, app: AppHandle) -> Result<Pet, String> {
         .find(|p| p.id == id)
         .ok_or_else(|| format!("pet '{id}' not found"))?;
     if let Some(state) = app.try_state::<AppState>() {
+        // Roll the variant *before* persisting active_pet_id so the JS
+        // pet-changed listener can immediately fetch the variant on load.
+        // Roll is idempotent — only fires the first time this pet is seen.
+        roll_pet_variant_if_needed(&state, &pet.id);
+        // Phase B: ensure pet_stats entry exists with first_seen_ms set.
+        // The closure is empty — bump_pet_stats already lazily initializes
+        // first_seen and days_active in its wrapper.
+        bump_pet_stats(&state, &pet.id, |_| {});
         update_config(&state, |cfg| cfg.active_pet_id = Some(pet.id.clone()));
     }
     app.emit("pet-changed", &pet).map_err(|e| e.to_string())?;
     Ok(pet)
 }
 
+// --- Variant system (Phase A) ---------------------------------------------
+
+// Read the variants[] array from a pet's pet.json. Empty vec = pet has no
+// variants declared, in which case the pet behaves as if it has a single
+// implicit "normal" variant (no recipe, no celebration).
+fn load_pet_variants(pet_id: &str) -> Vec<serde_json::Value> {
+    let Some(dir) = pet_dir() else {
+        return vec![];
+    };
+    let manifest = dir.join(pet_id).join("pet.json");
+    let Ok(text) = fs::read_to_string(&manifest) else {
+        return vec![];
+    };
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return vec![];
+    };
+    json.get("variants")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default()
+}
+
+fn variant_total_weight(variants: &[serde_json::Value]) -> u32 {
+    variants
+        .iter()
+        .filter_map(|v| v.get("weight").and_then(|w| w.as_u64()))
+        .map(|w| w as u32)
+        .sum()
+}
+
+// Weighted random pick. Returns the chosen variant's id string. None only if
+// the variants list is empty or every weight is 0/missing — both invalid
+// configs that the caller treats as "no roll needed".
+fn roll_variant_id(variants: &[serde_json::Value]) -> Option<String> {
+    let total = variant_total_weight(variants);
+    if total == 0 {
+        return None;
+    }
+    let mut r: u32 = rand::thread_rng().gen_range(0..total);
+    for v in variants {
+        let weight = v.get("weight").and_then(|w| w.as_u64()).unwrap_or(0) as u32;
+        if r < weight {
+            return v.get("id").and_then(|id| id.as_str()).map(String::from);
+        }
+        r -= weight;
+    }
+    None
+}
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+// Roll the variant for `pet_id` if and only if config has no entry for it
+// yet. Idempotent: subsequent activations of the same pet are no-ops.
+fn roll_pet_variant_if_needed(state: &AppState, pet_id: &str) {
+    let already_rolled = state
+        .config
+        .lock()
+        .ok()
+        .map(|c| c.pet_state.contains_key(pet_id))
+        .unwrap_or(false);
+    if already_rolled {
+        return;
+    }
+    let variants = load_pet_variants(pet_id);
+    let Some(variant_id) = roll_variant_id(&variants) else {
+        return;
+    };
+    update_config(state, |cfg| {
+        cfg.pet_state.insert(
+            pet_id.to_string(),
+            PetRollState {
+                variant_id,
+                rolled_at_ms: now_ms(),
+                revealed: false,
+                evolved_from: None,
+                evolved_at_ms: None,
+            },
+        );
+    });
+}
+
+// Resolve a variant id back to its full info (recipe, displayName, effects)
+// from the pet's pet.json. Returns None if the pet's variants array no
+// longer contains this id (e.g., author renamed it after the user rolled).
+// In that fallback case the JS side treats the pet as un-styled (normal).
+fn resolve_variant_info(pet_id: &str, variant_id: &str, revealed: bool) -> Option<PetVariantInfo> {
+    let variants = load_pet_variants(pet_id);
+    let total = variant_total_weight(&variants);
+    let total_f = if total == 0 { 1 } else { total } as f32;
+    let v = variants
+        .iter()
+        .find(|v| v.get("id").and_then(|x| x.as_str()) == Some(variant_id))?;
+    let weight = v.get("weight").and_then(|w| w.as_u64()).unwrap_or(0) as f32;
+    let display_name = v
+        .get("displayName")
+        .and_then(|n| {
+            // Prefer zh; fall back to en; then to id.
+            if let Some(s) = n.as_str() {
+                Some(s.to_string())
+            } else {
+                let zh = n.get("zh").and_then(|s| s.as_str()).map(String::from);
+                let en = n.get("en").and_then(|s| s.as_str()).map(String::from);
+                zh.or(en)
+            }
+        })
+        .unwrap_or_else(|| variant_id.to_string());
+    let recipe = v.get("recipe").cloned();
+    let recipe = match recipe {
+        Some(serde_json::Value::Object(map)) if !map.is_empty() => {
+            Some(serde_json::Value::Object(map))
+        }
+        _ => None,
+    };
+    let effects = v
+        .get("effects")
+        .and_then(|e| e.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|x| x.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    Some(PetVariantInfo {
+        variant_id: variant_id.to_string(),
+        display_name,
+        recipe,
+        weight_pct: weight / total_f,
+        effects,
+        revealed,
+    })
+}
+
+#[tauri::command]
+fn get_pet_variant(pet_id: String, state: State<AppState>) -> Option<PetVariantInfo> {
+    let (variant_id, revealed) = {
+        let cfg = state.config.lock().ok()?;
+        let s = cfg.pet_state.get(&pet_id)?;
+        (s.variant_id.clone(), s.revealed)
+    };
+    resolve_variant_info(&pet_id, &variant_id, revealed)
+}
+
+#[tauri::command]
+fn mark_variant_revealed(pet_id: String, app: AppHandle) -> Result<(), String> {
+    if let Some(state) = app.try_state::<AppState>() {
+        update_config(&state, |cfg| {
+            if let Some(s) = cfg.pet_state.get_mut(&pet_id) {
+                s.revealed = true;
+            }
+        });
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn release_pet(pet_id: String, app: AppHandle) -> Result<(), String> {
+    if let Some(state) = app.try_state::<AppState>() {
+        update_config(&state, |cfg| {
+            cfg.pet_state.remove(&pet_id);
+            cfg.pet_stats.remove(&pet_id);
+        });
+    }
+    // If the released pet is the active one, re-roll on next activation by
+    // re-emitting pet-changed so the frontend re-fetches everything.
+    let is_active = app
+        .try_state::<AppState>()
+        .and_then(|s| s.config.lock().ok().and_then(|c| c.active_pet_id.clone()))
+        .map(|id| id == pet_id)
+        .unwrap_or(false);
+    if is_active {
+        // Roll again immediately — the user expects the new state on
+        // confirm-click, not "next time you switch pets".
+        if let Some(state) = app.try_state::<AppState>() {
+            roll_pet_variant_if_needed(&state, &pet_id);
+        }
+        if let Some(pet) = list_pets().into_iter().find(|p| p.id == pet_id) {
+            app.emit("pet-changed", &pet).map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(())
+}
+
+// --- Stats tracking (Phase B) ---------------------------------------------
+//
+// Local-time helpers. We deliberately avoid a chrono/time crate dep — they
+// significantly slowed Tauri macro re-expansion on this project. Instead
+// we shell out to `/bin/date`, which is universally present on macOS and
+// Linux and handles TZ + DST correctly via the OS. Cost: ~1ms per call,
+// fired only on state events (a few per second tops).
+
+fn date_field(epoch_ms: u64, fmt: &str) -> Option<String> {
+    use std::process::Command;
+    let secs = (epoch_ms / 1000) as i64;
+    // BSD date (macOS) uses `-r <epoch>`; GNU date uses `-d @<epoch>`.
+    // Try BSD first, fall back to GNU.
+    let out = Command::new("date")
+        .args(["-r", &secs.to_string(), fmt])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .or_else(|| {
+            Command::new("date")
+                .args(["-d", &format!("@{secs}"), fmt])
+                .output()
+                .ok()
+        })?;
+    let s = String::from_utf8(out.stdout).ok()?;
+    Some(s.trim().to_string())
+}
+
+fn local_hour(epoch_ms: u64) -> u8 {
+    date_field(epoch_ms, "+%H")
+        .and_then(|s| s.parse::<u8>().ok())
+        .unwrap_or(12)
+}
+
+fn local_day_key(epoch_ms: u64) -> u32 {
+    date_field(epoch_ms, "+%Y%m%d")
+        .and_then(|s| s.parse::<u32>().ok())
+        .unwrap_or(0)
+}
+
+fn is_weekday(epoch_ms: u64) -> bool {
+    // %u prints day of week 1–7 with Monday = 1.
+    date_field(epoch_ms, "+%u")
+        .and_then(|s| s.parse::<u8>().ok())
+        .map(|n| n <= 5)
+        .unwrap_or(true)
+}
+
+// Time-of-day bucket for an epoch_ms in the user's local time. Boundaries
+// match docs/pet-evolution-variant-design.md §2.3 — morning 06–11,
+// afternoon 12–17, evening 18–22, night 23–05.
+fn classify_time_of_day(epoch_ms: u64) -> &'static str {
+    let hour = local_hour(epoch_ms);
+    match hour {
+        6..=11 => "morning",
+        12..=17 => "afternoon",
+        18..=22 => "evening",
+        _ => "night",
+    }
+}
+
+// Mutate the pet_stats[pet_id] entry, lazily creating it if missing.
+// Mirrors the update_config(state, |cfg| ...) pattern.
+fn bump_pet_stats<F: FnOnce(&mut PetStats)>(state: &AppState, pet_id: &str, f: F) {
+    update_config(state, |cfg| {
+        let stats = cfg
+            .pet_stats
+            .entry(pet_id.to_string())
+            .or_insert_with(PetStats::default);
+        let now = now_ms();
+        if stats.first_seen_ms == 0 {
+            stats.first_seen_ms = now;
+        }
+        let day = local_day_key(now);
+        if day != 0 && day != stats.last_local_day_key {
+            stats.last_local_day_key = day;
+            stats.days_active += 1;
+        }
+        stats.last_active_ms = now;
+        f(stats);
+    });
+}
+
+// Called from handle_state_file_event whenever the external state changes.
+// Increments the right counter for each meaningful state entry.
+fn record_state_event(state: &AppState, pet_id: &str, new_state: &str, prev_state: Option<&str>) {
+    bump_pet_stats(state, pet_id, |stats| {
+        match new_state {
+            "running" if prev_state != Some("running") => {
+                stats.total_turns += 1;
+                let now = stats.last_active_ms;
+                let bucket = classify_time_of_day(now);
+                match bucket {
+                    "morning" => stats.turn_buckets.morning += 1,
+                    "afternoon" => stats.turn_buckets.afternoon += 1,
+                    "evening" => stats.turn_buckets.evening += 1,
+                    _ => stats.turn_buckets.night += 1,
+                }
+                if is_weekday(now) {
+                    stats.turn_buckets.weekday += 1;
+                } else {
+                    stats.turn_buckets.weekend += 1;
+                }
+            }
+            "waving" if prev_state != Some("waving") => {
+                stats.total_waves += 1;
+            }
+            "failed" if prev_state != Some("failed") => {
+                stats.failures_seen += 1;
+            }
+            "review" | "waiting" if prev_state != Some(new_state) => {
+                stats.attention_seen += 1;
+            }
+            _ => {}
+        }
+    });
+}
+
+// JS-side calls: clicks are batched in JS (every 30s + on blur) so we
+// don't IPC per-click; attention_responded fires when the user dismisses
+// an attention prompt within the responsive window (also JS-detected).
+#[tauri::command]
+fn record_clicks(pet_id: String, count: u32, app: AppHandle) {
+    if count == 0 {
+        return;
+    }
+    if let Some(state) = app.try_state::<AppState>() {
+        bump_pet_stats(&state, &pet_id, |stats| {
+            stats.total_clicks += count as u64;
+        });
+    }
+}
+
+#[tauri::command]
+fn record_attention_responded(pet_id: String, app: AppHandle) {
+    if let Some(state) = app.try_state::<AppState>() {
+        bump_pet_stats(&state, &pet_id, |stats| {
+            stats.attention_responded += 1;
+        });
+    }
+}
+
+// Dev helper for the Phase C work — JS / tests can read the current
+// counters without going through file I/O.
+#[tauri::command]
+fn get_pet_stats(pet_id: String, state: State<AppState>) -> Option<PetStats> {
+    state.config.lock().ok()?.pet_stats.get(&pet_id).cloned()
+}
+
 // Build tag — touch this string to force cargo to recompile main.rs and
 // re-embed the latest frontend assets (the tauri::generate_context! macro
 // re-evaluates per compile). Frontend-only edits don't trigger a rebuild
 // otherwise, so a stale binary serves stale HTML/JS.
-const BUILD_TAG: &str = "openpets-2026-05-11-state-machine-v2";
+const BUILD_TAG: &str = "openpets-2026-05-14-variants-phaseAB";
 
 fn main() {
     eprintln!("[OpenPets] build: {BUILD_TAG}");
@@ -1269,6 +1752,12 @@ fn main() {
             set_onboarding_done,
             list_tool_connections,
             set_tool_connection,
+            get_pet_variant,
+            mark_variant_revealed,
+            release_pet,
+            record_clicks,
+            record_attention_responded,
+            get_pet_stats,
         ])
         .run(tauri::generate_context!())
         .expect("failed to run OpenPets");
