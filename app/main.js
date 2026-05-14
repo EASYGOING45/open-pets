@@ -308,7 +308,17 @@ function compileRecipe(recipe) {
 let activeVariant = null; // PetVariantInfo from Rust (null = unrolled / no variants)
 
 function applyVariantFilter() {
-  ctx.filter = activeVariant ? compileRecipe(activeVariant.recipe) : "none";
+  // We apply the recipe as a CSS filter on the canvas *element* rather
+  // than ctx.filter on the canvas *context*. ctx.filter is the spec'd
+  // path but on this project's WKWebView + transparent NSPanel +
+  // image-rendering:pixelated combo it silently no-ops at composite
+  // time even when the spec says it should work. CSS filter on the DOM
+  // element is GPU-composited at the WebView layer, totally separate
+  // from canvas drawing, and works reliably. The sparkle layer is in a
+  // sibling div so the filter doesn't tint it.
+  const filter = activeVariant ? compileRecipe(activeVariant.recipe) : "none";
+  canvas.style.filter = filter === "none" ? "" : filter;
+  console.log(`OpenPets: applied variant filter — ${filter}`, activeVariant);
 }
 
 function variantHasSparkle() {

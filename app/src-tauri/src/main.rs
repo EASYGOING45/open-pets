@@ -1653,7 +1653,7 @@ fn get_pet_stats(pet_id: String, state: State<AppState>) -> Option<PetStats> {
 // re-embed the latest frontend assets (the tauri::generate_context! macro
 // re-evaluates per compile). Frontend-only edits don't trigger a rebuild
 // otherwise, so a stale binary serves stale HTML/JS.
-const BUILD_TAG: &str = "openpets-2026-05-14-variants-phaseAB";
+const BUILD_TAG: &str = "openpets-2026-05-14-variants-cssfilter";
 
 fn main() {
     eprintln!("[OpenPets] build: {BUILD_TAG}");

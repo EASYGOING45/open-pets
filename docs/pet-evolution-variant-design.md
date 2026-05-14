@@ -97,18 +97,28 @@ Why not the others:
 
 **WKWebView caveats locked in:**
 
-- `ctx.filter` is supported as **string-form chained filter functions
-  only**. Do not use `ctx.filter = "url(#…)"` regardless of how
-  expressive the matrix would be.
+- ⚠️ **`ctx.filter` silently no-ops** on this project's specific stack
+  (transparent NSPanel + WKWebView + `image-rendering: pixelated`
+  canvas). Spec says Safari 16.4+ supports it; in practice on macOS 14+
+  with our window setup it composites as identity at render time —
+  the JS code runs end-to-end without errors but the user sees the
+  unfiltered sprite. **Apply the recipe as `canvas.style.filter`
+  on the DOM element instead.** See
+  `feedback_ctx_filter_silent_noop_on_nspanel.md` in auto-memory.
+- The recipe → CSS filter string compile is the same either way. Both
+  `ctx.filter` and `canvas.style.filter` accept the same chained
+  filter-function syntax.
 - Allowed filter functions: `hue-rotate(deg)`, `saturate(n)`,
   `brightness(n)`, `contrast(n)`, `sepia(n)`, `grayscale(n)`. Avoid
   `blur` / `drop-shadow` / `invert` (none of them help recoloring).
-- `clearRect` is unaffected by `ctx.filter`, so we don't need to
-  toggle filter off for canvas clears.
-- Setting `ctx.filter` once per pet load is enough — it persists
-  across draw calls. No per-frame state thrash.
+- Do not use `ctx.filter = "url(#…)"` (SVG filter reference)
+  regardless of how expressive the matrix would be — historically
+  buggy on WebKit, and we're avoiding `ctx.filter` anyway per above.
+- Setting `canvas.style.filter` once per pet load is enough — CSS
+  filter applies on every paint without intervention.
 - **Sparkle particles must NOT be drawn on the pet canvas** — they'd
-  inherit the recoloring filter. Use a sibling DOM layer (§1.5).
+  inherit the CSS filter (just as they would have inherited
+  ctx.filter). Use a sibling DOM layer (§1.5).
 
 ### 1.3 Recipe schema
 
