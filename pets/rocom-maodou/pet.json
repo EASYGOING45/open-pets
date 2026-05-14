@@ -2,5 +2,25 @@
   "id": "rocom-maodou",
   "displayName": "Maodou",
   "description": "A tiny Codex-style 大耳帽兜 (Big-Eared Hood-bunny) pet from Roco World — a chibi soft-white bunny spirit with long droopy pink-lined ears, teal eyes, pink-red forehead dots, and a long tail tipped in soft pink.",
-  "spritesheetPath": "spritesheet.webp"
+  "spritesheetPath": "spritesheet.webp",
+  "variants": [
+    {
+      "id": "normal",
+      "weight": 95,
+      "displayName": { "zh": "普通毛豆", "en": "Maodou" }
+    },
+    {
+      "id": "rose",
+      "weight": 4,
+      "displayName": { "zh": "蔷薇毛豆", "en": "Rosé Maodou" },
+      "recipe": { "hue_rotate": 25, "saturate": 1.25 }
+    },
+    {
+      "id": "moonlight",
+      "weight": 1,
+      "displayName": { "zh": "月夜毛豆", "en": "Moonlight Maodou" },
+      "recipe": { "hue_rotate": 200, "saturate": 1.4, "brightness": 1.08 },
+      "effects": ["sparkle"]
+    }
+  ]
 }
